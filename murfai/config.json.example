@@ -1,0 +1,44 @@
+{
+  "llm": {
+    "provider": "groq",
+    "api_key": "your_groq_api_key_here",
+    "model": "llama-3.1-8b-instant",
+    "temperature": 0.7,
+    "max_tokens": 100
+  },
+  "voice_styles": {
+    "happy": "Excited",
+    "sad": "Whisper",
+    "neutral": "Conversational",
+    "calm": "Soft"
+  },
+  "word_database": {
+    "source": "groq",
+    "provider": "groq",
+    "note": "Words are generated dynamically using Groq API. No static database needed."
+  },
+  "medication_reminders": {
+    "templates": {
+      "morning": "I noticed it's {time}. Usually, we take {medication} now with some water. Have you had breakfast yet?",
+      "afternoon": "It's {time} and time for your {medication}. Have you had lunch yet?",
+      "evening": "Good evening! It's {time} and time for your {medication}. Have you had dinner?"
+    },
+    "follow_ups": {
+      "not_eaten": "Okay, let's get some food first, then the {medication}. I'll remind you again in 10 minutes.",
+      "eaten": "Great! I'm glad you remembered. How are you feeling today?",
+      "taken": "Perfect! I'm proud of you for remembering. Is there anything else you'd like to talk about?"
+    }
+  },
+  "conversation": {
+    "system_prompt_template": "You are a warm, empathetic AI companion for elderly users. {sentiment_guidance} {state_guidance}",
+    "max_context_length": 5,
+    "response_max_length": 150
+  },
+  "features": {
+    "medication_reminders": true,
+    "word_of_day": true,
+    "sentiment_analysis": true,
+    "sundowning_support": true
+  }
+}
+

@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Large, readable fonts for elderly users */
+@layer base {
+  body {
+    @apply text-lg;
+    font-size: 18px;
+    line-height: 1.6;
+  }
+  
+  h1 {
+    @apply text-4xl font-bold;
+  }
+  
+  h2 {
+    @apply text-3xl font-semibold;
+  }
+  
+  h3 {
+    @apply text-2xl font-medium;
+  }
+  
+  button {
+    @apply text-xl;
+    min-height: 60px;
+    min-width: 120px;
+  }
+  
+  input, textarea, select {
+    @apply text-xl;
+    min-height: 50px;
+  }
+}
+
+/* Accessibility improvements */
+@layer utilities {
+  .focus-visible-large {
+    @apply focus:outline-none focus:ring-4 focus:ring-primary-500 focus:ring-offset-2;
+  }
+  
+  .button-large {
+    @apply px-8 py-4 text-2xl font-semibold rounded-lg;
+    min-height: 70px;
+    min-width: 150px;
+  }
+  
+  .text-large {
+    @apply text-xl;
+  }
+  
+  .text-extra-large {
+    @apply text-2xl;
+  }
+}
+
+/* Smooth animations */
+* {
+  transition: all 0.2s ease-in-out;
+}
+

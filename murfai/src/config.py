@@ -1,0 +1,50 @@
+"""Configuration management for the Loneliness Companion."""
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Config:
+    """Application configuration."""
+    
+    # API Keys
+    MURF_API_KEY = os.getenv("MURF_API_KEY", "")
+    MURF_API_URL = os.getenv("MURF_API_URL", "https://api.murf.ai/v1")
+    DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
+    
+    # ASR Settings - Patience Mode
+    PATIENCE_MODE_SILENCE_MS = int(os.getenv("PATIENCE_MODE_SILENCE_MS", "2000"))
+    ASR_MODEL = "nova-2"  # Deepgram model optimized for conversational audio
+    
+    # TTS Settings - Murf Falcon
+    MURF_VOICE_ID = "en-US-Neural"  # Base voice ID (adjust based on available voices)
+    DEFAULT_SPEECH_RATE = 1.0
+    CALM_SPEECH_RATE = 0.9  # 10% slower for Sundowning
+    DEFAULT_PITCH = 0.0
+    CALM_PITCH = -0.1  # Slightly lower pitch for calming effect
+    
+    # Time-based Settings
+    SUNDOWNING_HOUR = int(os.getenv("SUNDOWNING_HOUR", "17"))  # 5 PM
+    
+    # Medication Reminders
+    MEDICATION_REMINDER_INTERVAL_MINUTES = int(os.getenv("MEDICATION_REMINDER_INTERVAL_MINUTES", "60"))
+    
+    # Voice Styles for Murf Falcon (based on sentiment)
+    VOICE_STYLES = {
+        "happy": "Excited",
+        "sad": "Whisper",
+        "neutral": "Conversational",
+        "calm": "Soft"
+    }
+    
+    # Listening sounds during pauses
+    LISTENING_SOUNDS = [
+        "Hmm...",
+        "Go on...",
+        "I'm listening...",
+        "Take your time..."
+    ]
+    
+    # Database
+    DB_PATH = "conversation_memory.db"
+
