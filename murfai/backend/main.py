@@ -2,6 +2,13 @@
 import asyncio
 import logging
 import sys
+from pathlib import Path
+
+# Add parent directory to Python path so we can import from src
+backend_dir = Path(__file__).parent
+project_root = backend_dir.parent
+sys.path.insert(0, str(project_root))
+
 from src.core.companion import LonelinessCompanion
 from src.config import Config
 
@@ -55,4 +62,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 

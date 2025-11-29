@@ -2,7 +2,7 @@
 
 ## Overview
 
-The backend API server (`api_server.py`) provides REST endpoints for the Next.js frontend to interact with the Loneliness Companion.
+The backend API server (`backend/api_server.py`) provides REST endpoints for the Next.js frontend to interact with the Loneliness Companion.
 
 ## Quick Start
 
@@ -15,13 +15,13 @@ pip install -r requirements.txt
 ### 2. Start the API Server
 
 ```bash
-python api_server.py
+python backend/api_server.py
 ```
 
 Or using uvicorn directly:
 
 ```bash
-uvicorn api_server:app --host 0.0.0.0 --port 8000 --reload
+uvicorn backend.api_server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 The server will start on `http://localhost:8000`
@@ -74,7 +74,7 @@ The server is configured to allow requests from:
 - `http://localhost:3000` (Next.js default)
 - `http://127.0.0.1:3000`
 
-To add more origins, edit `api_server.py`:
+To add more origins, edit `backend/api_server.py`:
 
 ```python
 app.add_middleware(
@@ -108,7 +108,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 
 ### Terminal 1 - Backend
 ```bash
-python api_server.py
+python backend/api_server.py
 ```
 
 ### Terminal 2 - Frontend
@@ -154,7 +154,7 @@ Then visit `http://localhost:3000` - the frontend should now connect to the back
 
 3. **Check port availability**:
    - Make sure port 8000 is not in use
-   - Change port in `api_server.py` if needed
+   - Change port in `backend/api_server.py` if needed
 
 ### API Errors
 
@@ -168,7 +168,7 @@ For production:
 
 1. **Use production ASGI server**:
    ```bash
-   uvicorn api_server:app --host 0.0.0.0 --port 8000 --workers 4
+   uvicorn backend.api_server:app --host 0.0.0.0 --port 8000 --workers 4
    ```
 
 2. **Set up reverse proxy** (nginx, etc.)
@@ -186,4 +186,5 @@ Once the server is running, visit:
 - ReDoc: `http://localhost:8000/redoc`
 
 These provide interactive API documentation.
+
 

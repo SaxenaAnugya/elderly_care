@@ -30,6 +30,9 @@ class LonelinessCompanion:
         self.memory = ConversationMemory(Config.DB_PATH)
         self.sentiment_analyzer = SentimentAnalyzer()
         
+        # Load settings from database
+        self.settings = self._load_settings()
+        
         # Initialize with dynamic config
         self.medication_reminder = MedicationReminder(self.memory, self.dynamic_config)
         self.word_of_day = WordOfTheDay(self.dynamic_config)
@@ -51,16 +54,40 @@ class LonelinessCompanion:
         # Initialize ASR and TTS clients
         self.asr_client = DeepgramASRClient(
             Config.DEEPGRAM_API_KEY,
-            self._on_transcript_received
+            self._on_transcript_received,
+            patience_mode_ms=self.settings.get("patience_mode", Config.PATIENCE_MODE_SILENCE_MS)
         )
         self.tts_client = MurfTTSClient(
             Config.MURF_API_KEY,
             Config.MURF_API_URL
         )
+        # Update TTS client with database settings
+        self.tts_client.default_speech_rate = self.settings.get("speech_rate", Config.DEFAULT_SPEECH_RATE)
+        self.tts_client.default_sundowning_hour = self.settings.get("sundowning_hour", Config.SUNDOWNING_HOUR)
         
         self.is_running = False
         self.current_conversation_state = "idle"
         self.last_user_message = None
+    
+    def _load_settings(self) -> dict:
+        """Load settings from database, falling back to Config defaults."""
+        default_settings = {
+            "volume": 80,
+            "speech_rate": Config.DEFAULT_SPEECH_RATE,
+            "patience_mode": Config.PATIENCE_MODE_SILENCE_MS,
+            "sundowning_hour": Config.SUNDOWNING_HOUR,
+            "medication_reminders_enabled": True,
+            "word_of_day_enabled": True,
+        }
+        
+        try:
+            saved_settings = self.memory.get_settings()
+            default_settings.update(saved_settings)
+            logger.info(f"Loaded settings from database: {list(saved_settings.keys())}")
+        except Exception as e:
+            logger.warning(f"Error loading settings from database: {e}, using defaults")
+        
+        return default_settings
     
     async def _on_transcript_received(self, transcript: str):
         """
@@ -164,8 +191,18 @@ class LonelinessCompanion:
             sentiment: Sentiment for voice styling
         """
         try:
-            # Synthesize speech
-            audio_data = await self.tts_client.synthesize(text, sentiment=sentiment)
+            # Reload settings from database in case they changed
+            self.settings = self._load_settings()
+            self.tts_client.default_speech_rate = self.settings.get("speech_rate", Config.DEFAULT_SPEECH_RATE)
+            self.tts_client.default_sundowning_hour = self.settings.get("sundowning_hour", Config.SUNDOWNING_HOUR)
+            
+            # Synthesize speech with current settings
+            audio_data = await self.tts_client.synthesize(
+                text, 
+                sentiment=sentiment,
+                speech_rate=self.settings.get("speech_rate"),
+                sundowning_hour=self.settings.get("sundowning_hour")
+            )
             
             # Play audio
             self.audio_player.play_bytes(audio_data)

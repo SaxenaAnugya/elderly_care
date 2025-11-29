@@ -31,7 +31,8 @@ SUNDOWNING_HOUR=17
 ```
 murfai/
 ├── .env          ← Add all API keys here
-├── api_server.py
+├── backend/
+│   └── api_server.py
 └── ...
 ```
 

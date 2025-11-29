@@ -211,4 +211,88 @@ class ConversationMemory:
         
         conn.commit()
         conn.close()
+    
+    def save_settings(self, settings: Dict):
+        """
+        Save user settings to database.
+        
+        Args:
+            settings: Dictionary of settings to save
+        """
+        try:
+            logger.info(f"Saving settings to database at: {self.db_path}")
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            now = datetime.now().isoformat()
+            
+            for key, value in settings.items():
+                # Convert value to JSON string
+                value_str = json.dumps(value)
+                
+                cursor.execute("""
+                    INSERT OR REPLACE INTO user_preferences (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                """, (key, value_str, now))
+                logger.info(f"Saved setting: {key} = {value_str}")
+            
+            conn.commit()
+            
+            # Verify the save by reading back
+            cursor.execute("SELECT key, value FROM user_preferences")
+            saved_rows = cursor.fetchall()
+            logger.info(f"Verified: {len(saved_rows)} settings in database")
+            for row in saved_rows:
+                logger.debug(f"  - {row[0]}: {row[1]}")
+            
+            conn.close()
+            logger.info(f"Successfully saved {len(settings)} settings to database: {list(settings.keys())}")
+        except Exception as e:
+            logger.error(f"Error saving settings to database at {self.db_path}: {e}", exc_info=True)
+            raise
+    
+    def get_settings(self) -> Dict:
+        """
+        Get user settings from database.
+        
+        Returns:
+            Dictionary of settings
+        """
+        try:
+            logger.debug(f"Loading settings from database at: {self.db_path}")
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT key, value FROM user_preferences
+            """)
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            settings = {}
+            for row in rows:
+                try:
+                    # Parse JSON value
+                    settings[row['key']] = json.loads(row['value'])
+                except (json.JSONDecodeError, TypeError) as e:
+                    # If not JSON, try to convert to appropriate type
+                    value = row['value']
+                    logger.warning(f"Could not parse JSON for {row['key']}: {value}, error: {e}")
+                    # Try to convert to number if possible
+                    try:
+                        if '.' in str(value):
+                            settings[row['key']] = float(value)
+                        else:
+                            settings[row['key']] = int(value)
+                    except ValueError:
+                        # Keep as string
+                        settings[row['key']] = value
+            
+            logger.info(f"Loaded {len(settings)} settings from database: {list(settings.keys())}")
+            return settings
+        except Exception as e:
+            logger.error(f"Error loading settings from database at {self.db_path}: {e}", exc_info=True)
+            return {}
 

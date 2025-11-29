@@ -1,110 +1,132 @@
-'use client'
+ 'use client'
 
 import { useState, useEffect } from 'react'
 import VoiceInterface from '@/components/VoiceInterface'
-import MedicationReminders from '@/components/MedicationReminders'
-import WordOfDay from '@/components/WordOfDay'
-import ConversationHistory from '@/components/ConversationHistory'
-import Settings from '@/components/Settings'
-import TestLLM from '@/components/TestLLM'
-import { Mic, Pill, Book, MessageSquare, Settings as SettingsIcon, TestTube } from 'lucide-react'
+import { apiClient } from '@/lib/api'
 
-type Tab = 'voice' | 'medications' | 'word' | 'history' | 'settings' | 'test'
+type VoiceGender = 'male' | 'female'
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<Tab>('voice')
-  const [isConnected, setIsConnected] = useState(false)
+  const [voiceGender, setVoiceGender] = useState<VoiceGender>('female')
+  const [isInitialized, setIsInitialized] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
-    // Check API connection on mount
-    checkConnection()
+    // Load voice gender from settings
+    const loadSettings = async () => {
+      try {
+        const settings = await apiClient.getSettings()
+        if (settings.voice_gender === 'male' || settings.voice_gender === 'female') {
+          setVoiceGender(settings.voice_gender)
+        }
+      } catch (error) {
+        console.error('Failed to load settings:', error)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+    loadSettings()
   }, [])
 
-  const checkConnection = async () => {
+  const handleVoiceSelect = async (gender: VoiceGender) => {
+    setVoiceGender(gender)
+    setIsInitialized(true)
+    
+    // Save voice gender to settings
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/health`)
-      setIsConnected(response.ok)
+      await apiClient.updateSettings({ voice_gender: gender })
     } catch (error) {
-      setIsConnected(false)
+      console.error('Failed to save voice gender:', error)
     }
   }
 
-  const tabs = [
-    { id: 'voice' as Tab, label: 'Talk', icon: Mic, component: VoiceInterface },
-    { id: 'medications' as Tab, label: 'Medications', icon: Pill, component: MedicationReminders },
-    { id: 'word' as Tab, label: 'Word of Day', icon: Book, component: WordOfDay },
-    { id: 'history' as Tab, label: 'History', icon: MessageSquare, component: ConversationHistory },
-    { id: 'settings' as Tab, label: 'Settings', icon: SettingsIcon, component: Settings },
-    { id: 'test' as Tab, label: 'Test LLM', icon: TestTube, component: TestLLM },
-  ]
-
-  const ActiveComponent = tabs.find(tab => tab.id === activeTab)?.component || VoiceInterface
-
-  return (
-    <main className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
-      {/* Header */}
-      <header className="bg-white shadow-md py-6 px-4">
-        <div className="max-w-7xl mx-auto">
-          <h1 className="text-4xl font-bold text-primary-700 text-center">
-            Loneliness Companion
-          </h1>
-          <p className="text-xl text-gray-600 text-center mt-2">
-            Your caring AI friend
-          </p>
-          {!isConnected && (
-            <div className="mt-4 bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 rounded">
-              <p className="text-lg font-semibold">⚠️ Not connected to server</p>
-              <p className="text-base">Please check your connection</p>
-            </div>
-          )}
-        </div>
-      </header>
-
-      {/* Navigation Tabs */}
-      <nav className="bg-white border-b-4 border-primary-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4">
-          <div className="flex flex-wrap justify-center gap-2 py-4">
-            {tabs.map((tab) => {
-              const Icon = tab.icon
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`
-                    flex items-center gap-3 px-6 py-4 rounded-lg font-semibold text-xl
-                    transition-all duration-200
-                    ${activeTab === tab.id
-                      ? 'bg-primary-600 text-white shadow-lg transform scale-105'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }
-                    focus-visible-large
-                    button-large
-                  `}
-                  aria-label={tab.label}
-                >
-                  <Icon size={28} />
-                  <span>{tab.label}</span>
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      </nav>
-
-      {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 py-8">
-        <div className="bg-white rounded-2xl shadow-xl p-8 min-h-[600px]">
-          <ActiveComponent />
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-indigo-600 mx-auto mb-4"></div>
+          <p className="text-2xl text-gray-700">Loading...</p>
         </div>
       </div>
+    )
+  }
 
-      {/* Footer */}
-      <footer className="bg-gray-800 text-white py-6 mt-8">
-        <div className="max-w-7xl mx-auto px-4 text-center">
-          <p className="text-lg">Made with ❤️ for elderly care</p>
+  if (!isInitialized) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 flex items-center justify-center p-4">
+        <div className="max-w-4xl w-full">
+          {/* Header */}
+          <div className="text-center mb-12">
+            <h1 className="text-6xl font-light text-gray-800 mb-4 tracking-wide">
+              Loneliness Companion
+            </h1>
+            <p className="text-2xl text-gray-600 font-light">
+              Your caring AI friend, always here to listen
+            </p>
+          </div>
+
+          {/* Voice Selection */}
+          <div className="bg-white/80 backdrop-blur-lg rounded-3xl shadow-2xl p-12 border border-white/20">
+            <h2 className="text-4xl font-light text-gray-800 text-center mb-8">
+              Choose Your Companion's Voice
+            </h2>
+            
+            <div className="grid md:grid-cols-2 gap-8 max-w-2xl mx-auto">
+              {/* Female Voice Option */}
+              <button
+                onClick={() => handleVoiceSelect('female')}
+                className="group relative overflow-hidden bg-gradient-to-br from-pink-50 to-rose-50 rounded-2xl p-8 border-2 border-pink-200 hover:border-pink-400 transition-all duration-300 hover:shadow-xl transform hover:scale-105"
+              >
+                <div className="text-center">
+                  <div className="mb-6">
+                    <div className="w-32 h-32 mx-auto bg-gradient-to-br from-pink-200 to-rose-300 rounded-full flex items-center justify-center shadow-lg group-hover:shadow-xl transition-shadow">
+                      <svg className="w-16 h-16 text-pink-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" />
+                      </svg>
+                    </div>
+                  </div>
+                  <h3 className="text-3xl font-light text-gray-800 mb-2">Female Voice</h3>
+                  <p className="text-lg text-gray-600 font-light">Warm and soothing</p>
+                </div>
+                <div className="absolute inset-0 bg-gradient-to-br from-pink-400/0 to-rose-400/0 group-hover:from-pink-400/10 group-hover:to-rose-400/10 transition-all duration-300"></div>
+              </button>
+
+              {/* Male Voice Option */}
+              <button
+                onClick={() => handleVoiceSelect('male')}
+                className="group relative overflow-hidden bg-gradient-to-br from-blue-50 to-indigo-50 rounded-2xl p-8 border-2 border-blue-200 hover:border-blue-400 transition-all duration-300 hover:shadow-xl transform hover:scale-105"
+              >
+                <div className="text-center">
+                  <div className="mb-6">
+                    <div className="w-32 h-32 mx-auto bg-gradient-to-br from-blue-200 to-indigo-300 rounded-full flex items-center justify-center shadow-lg group-hover:shadow-xl transition-shadow">
+                      <svg className="w-16 h-16 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" />
+                      </svg>
+                    </div>
+                  </div>
+                  <h3 className="text-3xl font-light text-gray-800 mb-2">Male Voice</h3>
+                  <p className="text-lg text-gray-600 font-light">Calm and reassuring</p>
+                </div>
+                <div className="absolute inset-0 bg-gradient-to-br from-blue-400/0 to-indigo-400/0 group-hover:from-blue-400/10 group-hover:to-indigo-400/10 transition-all duration-300"></div>
+              </button>
+            </div>
+          </div>
+
+          {/* Decorative elements */}
+          <div className="mt-12 text-center">
+            <p className="text-lg text-gray-500 font-light">
+              Select a voice to begin your conversation
+            </p>
+          </div>
         </div>
-      </footer>
-    </main>
+      </div>
+    )
+  }
+
+  // Show voice interface after selection
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
+      <VoiceInterface voiceGender={voiceGender} />
+    </div>
   )
 }
-

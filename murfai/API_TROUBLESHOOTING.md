@@ -30,7 +30,7 @@
 
 1. **Start backend**:
    ```bash
-   python api_server.py
+   python backend/api_server.py
    ```
 
 2. **Start frontend**:
@@ -60,7 +60,7 @@ Open browser DevTools (F12) and check Console tab:
 
 ### Step 3: Check Backend Logs
 
-In the terminal running `api_server.py`, you should see:
+In the terminal running `backend/api_server.py`, you should see:
 ```
 INFO: Started voice session: <session_id>
 INFO: Received audio: <size> bytes
@@ -115,7 +115,7 @@ INFO: Generated response: <response>
 
 ### Enable Detailed Logging
 
-In `api_server.py`, the logging is already set to INFO level. To see more:
+In `backend/api_server.py`, the logging is already set to INFO level. To see more:
 ```python
 logging.basicConfig(level=logging.DEBUG)
 ```

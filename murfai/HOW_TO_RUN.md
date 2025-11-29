@@ -49,7 +49,7 @@ You have two options:
 
 #### Option A: Use the Helper Script (Easier)
 ```bash
-python create_env.py
+python backend/create_env.py
 ```
 Follow the prompts to enter your API keys.
 
@@ -72,7 +72,7 @@ Replace `your_actual_murf_api_key_here` and `your_actual_deepgram_api_key_here` 
 Run the setup verification script:
 
 ```bash
-python setup.py
+python backend/setup.py
 ```
 
 This will check:
@@ -85,7 +85,7 @@ This will check:
 Test individual components before running the full application:
 
 ```bash
-python test_setup.py
+python backend/test_setup.py
 ```
 
 This tests:
@@ -109,7 +109,7 @@ This tests:
 ### Step 7: Run the Application
 
 ```bash
-python main.py
+python backend/main.py
 ```
 
 The companion will:
@@ -138,14 +138,14 @@ Press `Ctrl+C` to stop the companion gracefully.
 pip install -r requirements.txt
 
 # 2. Create .env file with your API keys
-python create_env.py
+python backend/create_env.py
 # OR manually create .env file
 
 # 3. Verify setup
-python setup.py
+python backend/setup.py
 
 # 4. Run the application
-python main.py
+python backend/main.py
 ```
 
 ## Troubleshooting

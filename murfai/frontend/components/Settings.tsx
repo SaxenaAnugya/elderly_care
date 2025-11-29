@@ -12,6 +12,7 @@ export default function Settings() {
     sundowning_hour: 17,
     medication_reminders_enabled: true,
     word_of_day_enabled: true,
+    voice_gender: 'female' as 'male' | 'female',
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -116,6 +117,46 @@ export default function Settings() {
                 onChange={(e) => setSettings({ ...settings, speech_rate: parseFloat(e.target.value) })}
                 className="w-full h-4 bg-gray-200 rounded-lg appearance-none cursor-pointer"
               />
+            </div>
+
+            <div>
+              <label className="block text-xl font-semibold text-gray-700 mb-3">
+                Voice Gender
+              </label>
+              <div className="flex gap-4">
+                <button
+                  onClick={() => setSettings({ ...settings, voice_gender: 'female' })}
+                  className={`
+                    flex-1 px-6 py-4 rounded-lg border-2 transition-all
+                    ${settings.voice_gender === 'female'
+                      ? 'bg-pink-100 border-pink-400 text-pink-800'
+                      : 'bg-gray-50 border-gray-300 text-gray-700 hover:bg-gray-100'
+                    }
+                  `}
+                >
+                  <div className="text-center">
+                    <div className="text-2xl mb-2">👩</div>
+                    <div className="font-semibold">Female</div>
+                    <div className="text-sm mt-1">Warm and soothing</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => setSettings({ ...settings, voice_gender: 'male' })}
+                  className={`
+                    flex-1 px-6 py-4 rounded-lg border-2 transition-all
+                    ${settings.voice_gender === 'male'
+                      ? 'bg-blue-100 border-blue-400 text-blue-800'
+                      : 'bg-gray-50 border-gray-300 text-gray-700 hover:bg-gray-100'
+                    }
+                  `}
+                >
+                  <div className="text-center">
+                    <div className="text-2xl mb-2">👨</div>
+                    <div className="font-semibold">Male</div>
+                    <div className="text-sm mt-1">Calm and reassuring</div>
+                  </div>
+                </button>
+              </div>
             </div>
           </div>
         </div>
