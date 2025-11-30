@@ -2,9 +2,17 @@
 import asyncio
 import sys
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Add parent directory to Python path so we can import from src
+backend_dir = Path(__file__).parent
+project_root = backend_dir.parent
+sys.path.insert(0, str(project_root))
+
+# Load .env from parent directory (project root)
+env_path = project_root / '.env'
+load_dotenv(env_path)
 
 def test_sentiment():
     """Test sentiment analysis."""
@@ -174,4 +182,5 @@ async def main():
 if __name__ == "__main__":
     exit_code = asyncio.run(main())
     sys.exit(exit_code)
+
 

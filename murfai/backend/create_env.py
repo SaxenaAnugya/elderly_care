@@ -40,9 +40,10 @@ MEDICATION_REMINDER_INTERVAL_MINUTES={reminder_interval}
     print("\n✓ .env file created successfully!")
     print("\nNext steps:")
     print("1. Edit .env file and add your actual API keys")
-    print("2. Run: python setup.py (to verify configuration)")
-    print("3. Run: python main.py (to start the companion)")
+    print("2. Run: python backend/setup.py (to verify configuration)")
+    print("3. Run: python backend/main.py (to start the companion)")
 
 if __name__ == "__main__":
     create_env_file()
+
 

@@ -50,7 +50,12 @@ murfai/
 │   ├── core/             # Main Orchestrator
 │   │   └── companion.py
 │   └── config.py         # Configuration
-├── main.py               # Entry Point
+├── backend/              # Backend scripts and services
+│   ├── main.py           # Entry point
+│   ├── api_server.py     # REST API for frontend
+│   ├── create_env.py     # .env helper script
+│   ├── setup.py          # Setup verification
+│   └── test_setup.py     # Component testing
 ├── requirements.txt      # Dependencies
 ├── .env.example          # Environment Variables Template
 └── README.md
@@ -63,14 +68,14 @@ murfai/
 pip install -r requirements.txt
 
 # 2. Create .env file with your API keys
-python create_env.py
+python backend/create_env.py
 # OR manually create .env file with your keys
 
 # 3. Verify setup
-python setup.py
+python backend/setup.py
 
 # 4. Run the application
-python main.py
+python backend/main.py
 ```
 
 **📖 For detailed instructions, see [HOW_TO_RUN.md](HOW_TO_RUN.md)**
@@ -140,7 +145,7 @@ python main.py
 
 Run the companion:
 ```bash
-python main.py
+python backend/main.py
 ```
 
 The companion will:

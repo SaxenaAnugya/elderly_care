@@ -56,7 +56,7 @@ Replace `your_murf_api_key_here` and `your_deepgram_api_key_here` with your actu
 
 Run the setup check:
 ```bash
-python setup.py
+python backend/setup.py
 ```
 
 This will verify:
@@ -78,7 +78,7 @@ This will verify:
 ## Step 6: Run the Companion
 
 ```bash
-python main.py
+python backend/main.py
 ```
 
 The companion will:

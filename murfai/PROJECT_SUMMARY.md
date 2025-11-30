@@ -70,11 +70,13 @@ murfai/
 │   ├── core/                   # Main Orchestrator
 │   │   └── companion.py        # LonelinessCompanion class
 │   └── config.py               # Configuration
-├── main.py                     # Entry point
+├── backend/                    # Backend scripts & services
+│   ├── main.py                 # Entry point
+│   ├── api_server.py           # API server for frontend
+│   ├── create_env.py           # Environment setup helper
+│   ├── setup.py                # Setup verification
+│   └── test_setup.py           # Component testing
 ├── requirements.txt            # Dependencies
-├── setup.py                    # Setup verification
-├── test_setup.py               # Component testing
-├── create_env.py               # Environment setup helper
 ├── README.md                   # Full documentation
 ├── QUICKSTART.md               # Quick start guide
 ├── ARCHITECTURE.md             # System architecture
@@ -135,11 +137,11 @@ murfai/
 
 ### Installation Steps
 1. Install dependencies: `pip install -r requirements.txt`
-2. Create `.env` file: Run `python create_env.py` or manually create
+2. Create `.env` file: Run `python backend/create_env.py` or manually create
 3. Add API keys to `.env`
-4. Verify setup: `python setup.py`
-5. Test components: `python test_setup.py`
-6. Run application: `python main.py`
+4. Verify setup: `python backend/setup.py`
+5. Test components: `python backend/test_setup.py`
+6. Run application: `python backend/main.py`
 
 ## Usage Example
 
@@ -167,7 +169,7 @@ All configurable in `src/config.py` or `.env`:
 
 ### Component Tests
 ```bash
-python test_setup.py
+python backend/test_setup.py
 ```
 
 Tests:
@@ -179,7 +181,7 @@ Tests:
 
 ### Setup Verification
 ```bash
-python setup.py
+python backend/setup.py
 ```
 
 Checks:
@@ -206,7 +208,7 @@ Checks:
    - Test TTS synthesis
 
 3. **Test Full Pipeline**
-   - Run `python test_setup.py`
+   - Run `python backend/test_setup.py`
    - Test with actual microphone
    - Verify voice output
 

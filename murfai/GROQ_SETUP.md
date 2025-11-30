@@ -17,7 +17,8 @@ LLM_PROVIDER=groq
 ```
 murfai/
 ├── .env          ← Add your key here
-├── main.py
+├── backend/
+│   └── main.py
 └── ...
 ```
 
@@ -108,7 +109,7 @@ DEEPGRAM_API_KEY=your_deepgram_key
 
 After adding your API key, you can verify it's working:
 
-1. Run the application: `python main.py`
+1. Run the application: `python backend/main.py`
 2. Check the logs - you should see:
    - "Using Groq API for responses" (if provider is set to groq)
    - No "API key not found" warnings

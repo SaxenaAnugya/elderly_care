@@ -8,7 +8,7 @@ The Loneliness Companion is a voice-first AI application built with a modular ar
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Main Application (main.py)                │
+│            Main Application (backend/main.py)               │
 └───────────────────────────┬─────────────────────────────────┘
                             │
                             ▼

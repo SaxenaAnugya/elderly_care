@@ -1,4 +1,4 @@
-'use client'
+"use client"
 
 import { useState, useEffect } from 'react'
 import { MessageSquare, User, Bot } from 'lucide-react'

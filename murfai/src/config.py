@@ -18,6 +18,9 @@ class Config:
     
     # TTS Settings - Murf Falcon
     MURF_VOICE_ID = "en-US-Neural"  # Base voice ID (adjust based on available voices)
+    # Voice IDs for male and female voices (adjust based on available voices in Murf)
+    MURF_VOICE_FEMALE = "en-US-Neural-Female"  # Female voice ID
+    MURF_VOICE_MALE = "en-US-Neural-Male"  # Male voice ID
     DEFAULT_SPEECH_RATE = 1.0
     CALM_SPEECH_RATE = 0.9  # 10% slower for Sundowning
     DEFAULT_PITCH = 0.0

@@ -56,7 +56,7 @@ After adding keys, test:
 
 ```bash
 # Start API server
-python api_server.py
+python backend/api_server.py
 
 # In another terminal, test health
 curl http://localhost:8000/health
@@ -83,7 +83,7 @@ SUNDOWNING_HOUR=17
 
 ## Testing Voice Flow
 
-1. **Start backend**: `python api_server.py`
+1. **Start backend**: `python backend/api_server.py`
 2. **Start frontend**: `cd frontend && npm run dev`
 3. **Open browser**: http://localhost:3000
 4. **Click microphone** → Speak → Get voice response!
@@ -116,7 +116,8 @@ SUNDOWNING_HOUR=17
 ```
 murfai/
 ├── .env                    ← Add all API keys here
-├── api_server.py          ← Backend server (uses keys)
+├── backend/
+│   └── api_server.py       ← Backend server (uses keys)
 ├── src/
 │   ├── config.py          ← Loads keys from .env
 │   ├── utils/
