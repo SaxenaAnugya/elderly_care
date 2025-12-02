@@ -29,7 +29,8 @@ class MedicationReminder:
             List of medications due
         """
         current_time = datetime.now().strftime("%H:%M")
-        medications = self.memory.get_medications_due(current_time)
+        current_day = datetime.now().weekday()  # 0=Monday, 6=Sunday
+        medications = self.memory.get_medications_due(current_time, current_day)
         
         # Filter out recently reminded medications
         due_medications = []

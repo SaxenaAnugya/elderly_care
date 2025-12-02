@@ -11,6 +11,7 @@ class Config:
     MURF_API_KEY = os.getenv("MURF_API_KEY", "")
     MURF_API_URL = os.getenv("MURF_API_URL", "https://api.murf.ai/v1")
     DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
+    FISH_AUDIO_API_KEY = os.getenv("FISH_AUDIO_API_KEY", "")
     # NOTE: DEFAULT_VOICE_LOCALE, PATIENCE_MODE_SILENCE_MS, and SUNDOWNING_HOUR
     # are now managed in the database via settings. These are hardcoded defaults
     # only used as fallback when database is not available.

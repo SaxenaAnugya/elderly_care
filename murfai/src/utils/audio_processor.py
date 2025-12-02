@@ -231,3 +231,43 @@ async def synthesize_speech_with_murf(
         logger.error(f"Error synthesizing speech: {e}")
         raise
 
+async def synthesize_speech_with_fish_audio(
+    text: str,
+    reference_id: Optional[str] = None,
+    language: Optional[str] = None,
+    api_key: str = None
+) -> bytes:
+    """
+    Synthesize speech using Fish Audio API for voice cloning.
+    
+    Args:
+        text: Text to synthesize
+        reference_id: Voice model ID from fish.audio (for voice cloning)
+        language: Language code (e.g., 'en', 'hi')
+        api_key: Fish Audio API key (uses Config if not provided)
+        
+    Returns:
+        Audio bytes (MP3 format)
+    """
+    try:
+        api_key = api_key or Config.FISH_AUDIO_API_KEY
+        
+        if not api_key:
+            raise ValueError("Fish Audio API key not configured")
+        
+        # Import TTS client
+        from ..tts.fish_audio_client import FishAudioClient
+        
+        tts_client = FishAudioClient(api_key)
+        audio_data = await tts_client.synthesize(
+            text=text,
+            reference_id=reference_id,
+            language=language
+        )
+        await tts_client.close()
+        
+        return audio_data
+    except Exception as e:
+        logger.error(f"Error synthesizing speech with Fish Audio: {e}")
+        raise
+

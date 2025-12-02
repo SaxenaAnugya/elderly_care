@@ -53,8 +53,38 @@ class ConversationMemory:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 medication_name TEXT NOT NULL,
                 time TEXT NOT NULL,
+                days TEXT,
                 last_reminded TEXT,
                 last_taken TEXT
+            )
+        """)
+        
+        # Add days column if it doesn't exist (for existing databases)
+        try:
+            cursor.execute("ALTER TABLE medication_schedule ADD COLUMN days TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
+        # Voice clones table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS voice_clones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                reference_id TEXT NOT NULL UNIQUE,
+                description TEXT,
+                is_active INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        
+        # Emergency call log table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS emergency_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone_number TEXT NOT NULL,
+                triggered_at TEXT NOT NULL,
+                reason TEXT,
+                conversation_count INTEGER
             )
         """)
         
@@ -137,13 +167,17 @@ class ConversationMemory:
         
         return "\n".join(context_parts)
     
-    def save_medication_schedule(self, medication_name: str, time: str):
+    def save_medication_schedule(self, medication_name: str, time: str, days: Optional[str] = None) -> int:
         """
         Save medication schedule.
         
         Args:
             medication_name: Name of medication
             time: Time to take medication (HH:MM format)
+            days: Comma-separated days (e.g., "Monday,Wednesday,Friday" or "1,2,3" for days of week)
+            
+        Returns:
+            The medication ID (existing or newly created)
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -158,28 +192,34 @@ class ConversationMemory:
         
         if existing:
             # Update existing
+            medication_id = existing[0]
             cursor.execute("""
                 UPDATE medication_schedule
-                SET medication_name = ?, time = ?
+                SET medication_name = ?, time = ?, days = ?
                 WHERE id = ?
-            """, (medication_name, time, existing[0]))
+            """, (medication_name, time, days, medication_id))
+            logger.info(f"Updated existing medication ID {medication_id}: {medication_name} at {time} on {days or 'all days'}")
         else:
             # Insert new
             cursor.execute("""
-                INSERT INTO medication_schedule (medication_name, time)
-                VALUES (?, ?)
-            """, (medication_name, time))
+                INSERT INTO medication_schedule (medication_name, time, days)
+                VALUES (?, ?, ?)
+            """, (medication_name, time, days))
+            medication_id = cursor.lastrowid
+            logger.info(f"Inserted new medication ID {medication_id}: {medication_name} at {time} on {days or 'all days'}")
         
         conn.commit()
         conn.close()
-        logger.info(f"Saved medication schedule: {medication_name} at {time}")
+        logger.info(f"Saved medication schedule to database: {self.db_path}, medication_id: {medication_id}")
+        return medication_id
     
-    def get_medications_due(self, current_time: str) -> List[Dict]:
+    def get_medications_due(self, current_time: str, current_day: Optional[int] = None) -> List[Dict]:
         """
         Get medications due at current time.
         
         Args:
             current_time: Current time in HH:MM format
+            current_day: Current day of week (0=Monday, 6=Sunday), or None to check all days
             
         Returns:
             List of medications due
@@ -188,6 +228,7 @@ class ConversationMemory:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
+        # Get all medications at this time
         cursor.execute("""
             SELECT * FROM medication_schedule
             WHERE time = ?
@@ -196,7 +237,34 @@ class ConversationMemory:
         rows = cursor.fetchall()
         conn.close()
         
-        return [dict(row) for row in rows]
+        medications = []
+        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        
+        for row in rows:
+            med = dict(row)
+            days_str = med.get('days')
+            
+            # If no days specified, medication is due every day
+            if not days_str or days_str.strip() == '':
+                medications.append(med)
+                continue
+            
+            # If current_day is None, include all medications (for backward compatibility)
+            if current_day is None:
+                medications.append(med)
+                continue
+            
+            # Check if current day matches
+            days_list = [d.strip() for d in days_str.split(',')]
+            current_day_name = day_names[current_day]
+            
+            # Check if current day is in the list (by name or number)
+            if (current_day_name in days_list or 
+                str(current_day) in days_list or 
+                str(current_day + 1) in days_list):  # +1 for 1-7 format
+                medications.append(med)
+        
+        return medications
     
     def mark_medication_reminded(self, medication_id: int):
         """Mark medication as reminded."""
@@ -218,7 +286,7 @@ class ConversationMemory:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, medication_name, time, last_reminded, last_taken
+            SELECT id, medication_name, time, days, last_reminded, last_taken
             FROM medication_schedule
             ORDER BY time
         """)
