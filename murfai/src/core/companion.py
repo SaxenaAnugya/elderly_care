@@ -55,7 +55,7 @@ class LonelinessCompanion:
         self.asr_client = DeepgramASRClient(
             Config.DEEPGRAM_API_KEY,
             self._on_transcript_received,
-            patience_mode_ms=self.settings.get("patience_mode", Config.PATIENCE_MODE_SILENCE_MS)
+            patience_mode_ms=self.settings.get("patience_mode", 2000)  # Hardcoded default
         )
         self.tts_client = MurfTTSClient(
             Config.MURF_API_KEY,
@@ -63,19 +63,19 @@ class LonelinessCompanion:
         )
         # Update TTS client with database settings
         self.tts_client.default_speech_rate = self.settings.get("speech_rate", Config.DEFAULT_SPEECH_RATE)
-        self.tts_client.default_sundowning_hour = self.settings.get("sundowning_hour", Config.SUNDOWNING_HOUR)
+        self.tts_client.default_sundowning_hour = self.settings.get("sundowning_hour", 17)  # Hardcoded default
         
         self.is_running = False
         self.current_conversation_state = "idle"
         self.last_user_message = None
     
     def _load_settings(self) -> dict:
-        """Load settings from database, falling back to Config defaults."""
+        """Load settings from database, falling back to hardcoded defaults (not from .env)."""
         default_settings = {
             "volume": 80,
             "speech_rate": Config.DEFAULT_SPEECH_RATE,
-            "patience_mode": Config.PATIENCE_MODE_SILENCE_MS,
-            "sundowning_hour": Config.SUNDOWNING_HOUR,
+            "patience_mode": 2000,  # Hardcoded default (not from .env)
+            "sundowning_hour": 17,  # Hardcoded default (not from .env)
             "medication_reminders_enabled": True,
             "word_of_day_enabled": True,
         }
@@ -194,7 +194,7 @@ class LonelinessCompanion:
             # Reload settings from database in case they changed
             self.settings = self._load_settings()
             self.tts_client.default_speech_rate = self.settings.get("speech_rate", Config.DEFAULT_SPEECH_RATE)
-            self.tts_client.default_sundowning_hour = self.settings.get("sundowning_hour", Config.SUNDOWNING_HOUR)
+            self.tts_client.default_sundowning_hour = self.settings.get("sundowning_hour", 17)  # Hardcoded default
             
             # Synthesize speech with current settings
             audio_data = await self.tts_client.synthesize(

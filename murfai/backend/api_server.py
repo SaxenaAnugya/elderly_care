@@ -4,8 +4,8 @@ import logging
 import os
 import sys
 import uuid
-from datetime import datetime
-from typing import List, Optional, Dict, Any
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import subprocess
 import shutil
@@ -25,6 +25,9 @@ from pydantic import BaseModel
 from src.core.companion import LonelinessCompanion
 from src.config import Config
 from src.memory.conversation_db import ConversationMemory
+from src.llm.response_generator import DynamicResponseGenerator
+from src.sentiment.analyzer import SentimentAnalyzer
+from src.utils.audio_processor import synthesize_speech_with_murf, transcribe_audio_with_deepgram
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -93,20 +96,30 @@ app.add_middleware(
 companion: Optional[LonelinessCompanion] = None
 memory: Optional[ConversationMemory] = None
 active_sessions: Dict[str, Dict[str, Any]] = {}
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq")
+llm_generator = DynamicResponseGenerator(api_provider=LLM_PROVIDER)
+sentiment_analyzer = SentimentAnalyzer()
+
+# Hardcoded default settings (not from .env - these come from database)
+# These are only used if settings are not found in the database
+DEFAULT_PATIENCE_MODE_MS = 2000
+DEFAULT_SUNDOWNING_HOUR = 17
+DEFAULT_VOICE_LOCALE = "en-US"
 
 def get_effective_settings() -> Dict[str, Any]:
     """
-    Get effective settings from database, falling back to Config defaults.
-    This ensures database settings are used when available.
+    Get effective settings from database, falling back to hardcoded defaults.
+    Settings are always loaded from database when available - no .env fallback.
     """
     default_settings = {
         "volume": 80,
         "speech_rate": 1.0,
-        "patience_mode": Config.PATIENCE_MODE_SILENCE_MS,
-        "sundowning_hour": Config.SUNDOWNING_HOUR,
+        "patience_mode": DEFAULT_PATIENCE_MODE_MS,
+        "sundowning_hour": DEFAULT_SUNDOWNING_HOUR,
         "medication_reminders_enabled": True,
         "word_of_day_enabled": True,
         "voice_gender": "female",  # Default to female voice
+        "voice_locale": DEFAULT_VOICE_LOCALE,
     }
     
     if memory:
@@ -119,6 +132,251 @@ def get_effective_settings() -> Dict[str, Any]:
             logger.warning(f"Error loading settings from database: {e}, using defaults")
     
     return default_settings
+
+def _normalize_locale(locale_value: Optional[str]) -> str:
+    """Normalize locale value, using hardcoded default if not provided."""
+    if not locale_value:
+        return DEFAULT_VOICE_LOCALE
+    return locale_value
+
+def _session_state(session_id: str) -> Dict[str, Any]:
+    session = active_sessions.setdefault(session_id, {
+        "session_id": session_id,
+        "created_at": datetime.now().isoformat(),
+        "is_listening": True,
+        "is_speaking": False,
+        "state": "idle",
+        "reminiscence_turns_left": 0,
+        "medication_nudges": {},
+        "last_prompt_at": None,
+    })
+    return session
+
+def _should_trigger_reminiscence(transcript: str, sentiment: str) -> bool:
+    lowered = transcript.lower()
+    keywords = [
+        "lonely",
+        "alone",
+        "miss",
+        "remember",
+        "memory",
+        "husband",
+        "wife",
+        "days",
+        "old times",
+        "childhood",
+    ]
+    if sentiment in ("sad", "negative"):
+        return True
+    return any(word in lowered for word in keywords)
+
+async def _build_response_for_transcript(
+    transcript: str,
+    session_id: str,
+    trigger: str,
+    forced_state: Optional[str] = None,
+    topic: Optional[str] = None,
+    additional_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not memory:
+        raise HTTPException(status_code=503, detail="Memory not initialized")
+
+    settings = get_effective_settings()
+    voice_locale = _normalize_locale(settings.get("voice_locale"))
+    session_ctx = _session_state(session_id)
+    logger.info(f"[Pipeline] Processing transcript trigger={trigger} len={len(transcript)} chars (session {session_id})")
+
+    sentiment_result = sentiment_analyzer.analyze(transcript)
+
+    conversation_state = forced_state or session_ctx.get("state", "idle")
+    if conversation_state == "idle" and _should_trigger_reminiscence(transcript, sentiment_result["sentiment"]):
+        conversation_state = "reminiscence"
+        session_ctx["state"] = "reminiscence"
+        session_ctx["reminiscence_turns_left"] = 3
+        session_ctx["last_reminiscence_at"] = datetime.now().isoformat()
+    elif conversation_state == "reminiscence":
+        turns_left = session_ctx.get("reminiscence_turns_left", 3) - 1
+        session_ctx["reminiscence_turns_left"] = turns_left
+        if turns_left <= 0 or any(stop in transcript.lower() for stop in ("stop", "enough", "done")):
+            session_ctx["state"] = "idle"
+            conversation_state = "idle"
+
+    context = memory.get_conversation_context(limit=5)
+
+    try:
+        response_text = await llm_generator.generate_response(
+            user_message=transcript,
+            sentiment=sentiment_result["sentiment"],
+            context=context,
+            state=conversation_state,
+            additional_context=additional_context,
+        )
+    except Exception as e:
+        logger.error(f"LLM generation error: {e}", exc_info=True)
+        response_text = "I'm here with you. Would you like to tell me a memory or how you're feeling?"
+
+    if not response_text:
+        response_text = "I'm right here whenever you want to continue."
+
+    speech_rate = settings.get("speech_rate", 1.0)
+    sundowning_hour = settings.get("sundowning_hour", DEFAULT_SUNDOWNING_HOUR)
+    voice_gender = settings.get("voice_gender", "female")
+
+    response_audio: Optional[bytes] = None
+    if Config.MURF_API_KEY:
+        try:
+            response_audio = await synthesize_speech_with_murf(
+                response_text,
+                sentiment=sentiment_result["sentiment"],
+                api_key=Config.MURF_API_KEY,
+                api_url=Config.MURF_API_URL,
+                speech_rate=speech_rate,
+                sundowning_hour=sundowning_hour,
+                voice_gender=voice_gender,
+                voice_locale=voice_locale,
+            )
+        except Exception as e:
+            logger.error(f"Murf synthesis failed: {e}", exc_info=True)
+            response_audio = None
+
+    memory.save_conversation(
+        transcript,
+        response_text,
+        sentiment=sentiment_result["sentiment"],
+        topic=topic or conversation_state,
+    )
+
+    return {
+        "text": response_text,
+        "sentiment": sentiment_result["sentiment"],
+        "audio": response_audio,
+        "voice_locale": voice_locale,
+        "state": conversation_state,
+    }
+
+async def _send_medication_nudge(
+    session_id: str,
+    safe_send_json,
+    medication: Dict[str, Any],
+    phase: str,
+):
+    settings = get_effective_settings()
+    locale = _normalize_locale(settings.get("voice_locale"))
+    med_name = medication.get("medication_name", "your medicine")
+    due_time = medication.get("time")
+
+    if locale.lower().startswith("hi"):
+        if phase == "upcoming":
+            message = f"लगभग {due_time} बजे {med_name} लेने का समय आने वाला है। क्या हम इसे तैयार रखें?"
+        else:
+            message = f"अब {med_name} लेने का समय है। क्या आपने ले लिया?"
+    else:
+        if phase == "upcoming":
+            message = f"It's almost time for your {med_name} around {due_time}. Shall we get it ready?"
+        else:
+            message = f"It's time to take {med_name}. Have you had it yet?"
+
+    await safe_send_json({
+        "type": "medication_nudge",
+        "phase": phase,
+        "medication": medication,
+        "text": message,
+    })
+
+    audio_payload = None
+    if Config.MURF_API_KEY:
+        try:
+            audio_payload = await synthesize_speech_with_murf(
+                message,
+                sentiment="neutral",
+                api_key=Config.MURF_API_KEY,
+                api_url=Config.MURF_API_URL,
+                speech_rate=settings.get("speech_rate", 1.0),
+                sundowning_hour=settings.get("sundowning_hour", DEFAULT_SUNDOWNING_HOUR),
+                voice_gender=settings.get("voice_gender", "female"),
+                voice_locale=locale,
+            )
+        except Exception as e:
+            logger.error(f"Medication nudge TTS failed: {e}", exc_info=True)
+
+    if audio_payload:
+        import base64
+        await safe_send_json({
+            "type": "audio",
+            "data": base64.b64encode(audio_payload).decode("utf-8"),
+            "format": "wav",
+        })
+
+    memory.save_conversation(
+        "[medication_nudge]",
+        message,
+        sentiment="neutral",
+        topic="medication_nudge",
+    )
+
+def _time_to_minutes(time_str: str) -> Optional[int]:
+    try:
+        parts = time_str.split(":")
+        if len(parts) < 2:
+            return None
+        hour = int(parts[0])
+        minute = int(parts[1])
+        return hour * 60 + minute
+    except Exception:
+        return None
+
+async def _medication_nudge_loop(session_id: str, safe_send_json, stop_event: asyncio.Event):
+    if not memory:
+        return
+
+    logger.info(f"Starting medication nudge loop for session {session_id}")
+    lead = Config.MEDICATION_NUDGE_LEAD_MINUTES
+    grace = Config.MEDICATION_NUDGE_GRACE_MINUTES
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=30)
+            if stop_event.is_set():
+                break
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            meds = memory.get_all_medications()
+            if not meds:
+                continue
+
+            now = datetime.now()
+            now_minutes = now.hour * 60 + now.minute
+            session_ctx = _session_state(session_id)
+            nudges = session_ctx.setdefault("medication_nudges", {})
+
+            for med in meds:
+                med_time = med.get("time")
+                med_minutes = _time_to_minutes(med_time) if med_time else None
+                if med_minutes is None:
+                    continue
+
+                diff = med_minutes - now_minutes
+                med_id = med.get("id", med_time)
+                day_key = now.strftime("%Y-%m-%d")
+
+                upcoming_key = f"{med_id}_upcoming_{day_key}"
+                due_key = f"{med_id}_due_{day_key}"
+
+                if 0 < diff <= lead and upcoming_key not in nudges:
+                    await _send_medication_nudge(session_id, safe_send_json, med, "upcoming")
+                    nudges[upcoming_key] = now.isoformat()
+
+                if abs(diff) <= grace and due_key not in nudges:
+                    await _send_medication_nudge(session_id, safe_send_json, med, "due")
+                    nudges[due_key] = now.isoformat()
+                    if med.get("id"):
+                        memory.mark_medication_reminded(med["id"])
+        except Exception as med_err:
+            logger.error(f"Medication nudge loop error: {med_err}", exc_info=True)
+
+    logger.info(f"Medication nudge loop stopped for session {session_id}")
 
 # Pydantic models
 class ConversationMessage(BaseModel):
@@ -144,6 +402,7 @@ class Settings(BaseModel):
     medication_reminders_enabled: Optional[bool] = None
     word_of_day_enabled: Optional[bool] = None
     voice_gender: Optional[str] = None  # "male" or "female"
+    voice_locale: Optional[str] = None
 
 @app.on_event("startup")
 async def startup_event():
@@ -246,12 +505,7 @@ async def test_llm(request: Dict[str, Any]):
 async def start_voice_session():
     """Start a new voice session."""
     session_id = str(uuid.uuid4())
-    active_sessions[session_id] = {
-        "session_id": session_id,
-        "created_at": datetime.now().isoformat(),
-        "is_listening": False,
-        "is_speaking": False,
-    }
+    _session_state(session_id)
     logger.info(f"Started voice session: {session_id}")
     return {"session_id": session_id}
 
@@ -277,24 +531,17 @@ async def send_voice_message(session_id: str, audio: UploadFile = File(...)):
         raise HTTPException(status_code=503, detail="Memory not initialized")
     
     try:
-        # Step 1: Read audio file
         audio_data = await audio.read()
-        logger.info(f"Received audio: {len(audio_data)} bytes")
-        
-        # Step 2: Transcribe audio with Deepgram ASR
-        from src.utils.audio_processor import transcribe_audio_with_deepgram
-        from src.config import Config
-        
+        logger.info(f"[HTTP] /voice/message session={session_id} bytes={len(audio_data)} type={audio.content_type}")
+
         if not Config.DEEPGRAM_API_KEY:
             raise HTTPException(status_code=500, detail="Deepgram API key not configured. Add DEEPGRAM_API_KEY to .env file")
-        
-        # Get effective settings from database
+
         settings = get_effective_settings()
-        patience_mode = settings.get("patience_mode", Config.PATIENCE_MODE_SILENCE_MS)
-        
-        # Detect audio format from content type or default to webm
-        content_type = audio.content_type or "audio/webm"
-        # Log what we're sending to Deepgram (size + snippet) and handle transcription errors gracefully
+        patience_mode = settings.get("patience_mode", DEFAULT_PATIENCE_MODE_MS)
+        voice_locale = _normalize_locale(settings.get("voice_locale"))
+
+        content_type = audio.content_type or "audio/webm;codecs=opus"
         try:
             logger.info(f"Deepgram input: {len(audio_data)} bytes (snippet hex: {audio_data[:64].hex()})")
         except Exception:
@@ -305,7 +552,8 @@ async def send_voice_message(session_id: str, audio: UploadFile = File(...)):
                 audio_data,
                 Config.DEEPGRAM_API_KEY,
                 content_type,
-                patience_mode_ms=patience_mode
+                patience_mode_ms=patience_mode,
+                language=voice_locale,
             )
         except Exception as e:
             logger.warning(f"Deepgram transcription error: {e}", exc_info=True)
@@ -317,103 +565,31 @@ async def send_voice_message(session_id: str, audio: UploadFile = File(...)):
             logger.info("Deepgram transcript: BLANK_OR_EMPTY")
 
         if not transcript:
-            raise HTTPException(status_code=400, detail="No speech detected in audio")
-        
-        # Step 3: Analyze sentiment
-        if companion and hasattr(companion, 'sentiment_analyzer'):
-            sentiment_result = companion.sentiment_analyzer.analyze(transcript)
-        else:
-            from src.sentiment.analyzer import SentimentAnalyzer
-            analyzer = SentimentAnalyzer()
-            sentiment_result = analyzer.analyze(transcript)
-        
-        # Step 4: Get conversation context
-        context = memory.get_conversation_context(limit=3)
-        
-        # Step 5: Generate response with Groq LLM
-        try:
-            if companion and hasattr(companion, '_generate_response'):
-                logger.info("Using companion's response generator")
-                response_text = await companion._generate_response(
-                    transcript,
-                    sentiment_result["sentiment"],
-                    context
-                )
-            else:
-                logger.info("Using standalone response generator with Groq")
-                from src.llm.response_generator import DynamicResponseGenerator
-                import os
-                llm_provider = os.getenv("LLM_PROVIDER", "groq")
-                generator = DynamicResponseGenerator(api_provider=llm_provider)
-                response_text = await generator.generate_response(
-                    transcript,
-                    sentiment_result["sentiment"],
-                    context,
-                    state="idle"
-                )
-            
-            if not response_text or response_text.strip() == "":
-                raise Exception("LLM returned empty response")
-            
-            logger.info(f"Generated response: {response_text[:100]}...")
-        except Exception as e:
-            logger.error(f"Error generating LLM response: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
-        
-        # Step 6: Synthesize speech with Murf TTS
-        from src.utils.audio_processor import synthesize_speech_with_murf
-        from src.config import Config
-        
-        if not Config.MURF_API_KEY:
-            raise HTTPException(status_code=500, detail="Murf API key not configured. Add MURF_API_KEY to .env file")
-        
-        try:
-            # Get effective settings from database for TTS
-            settings = get_effective_settings()
-            speech_rate = settings.get("speech_rate", 1.0)
-            sundowning_hour = settings.get("sundowning_hour", Config.SUNDOWNING_HOUR)
-            voice_gender = settings.get("voice_gender", "female")
-            
-            response_audio = await synthesize_speech_with_murf(
-                response_text,
-                sentiment=sentiment_result["sentiment"],
-                api_key=Config.MURF_API_KEY,
-                api_url=Config.MURF_API_URL,
-                speech_rate=speech_rate,
-                sundowning_hour=sundowning_hour,
-                voice_gender=voice_gender
-            )
-            logger.info(f"Generated audio: {len(response_audio)} bytes")
-        except Exception as e:
-            logger.error(f"TTS error: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"TTS error: {str(e)}")
-        
-        # Step 7: Save conversation
-        memory.save_conversation(
+            logger.info("[HTTP] No speech detected; returning empty response without TTS.")
+            return {
+                "transcript": "",
+                "response": "",
+                "sentiment": "neutral",
+            }
+
+        payload = await _build_response_for_transcript(
             transcript,
-            response_text,
-            sentiment=sentiment_result["sentiment"]
+            session_id,
+            trigger="http_fallback",
         )
-        
-        # Step 8: Update session
-        active_sessions[session_id]["is_listening"] = False
-        
-        # Step 9: Return response
-        from fastapi.responses import Response
-        
+
         response_data = {
             "transcript": transcript,
-            "response": response_text,
-            "sentiment": sentiment_result["sentiment"]
+            "response": payload["text"],
+            "sentiment": payload["sentiment"],
         }
-        
-        # If we have audio, return it as base64 or provide download URL
-        if response_audio:
+        logger.info(f"[HTTP] Transcribed {len(transcript)} chars -> response {len(payload['text'])} chars (session {session_id})")
+
+        if payload.get("audio"):
             import base64
-            audio_base64 = base64.b64encode(response_audio).decode('utf-8')
-            response_data["response_audio"] = audio_base64
+            response_data["response_audio"] = base64.b64encode(payload["audio"]).decode("utf-8")
             response_data["response_audio_format"] = "wav"
-        
+
         return response_data
         
     except HTTPException:
@@ -680,13 +856,8 @@ async def websocket_voice(websocket: WebSocket):
         return
     
     session_id = str(uuid.uuid4())
-    active_sessions[session_id] = {
-        "session_id": session_id,
-        "created_at": datetime.now().isoformat(),
-        "is_listening": False,
-        "is_speaking": False,
-    }
-    
+    session_state = _session_state(session_id)
+
     logger.info(f"WebSocket connection established: {session_id}")
 
     # Helper to safely send JSON over the websocket without raising when closed.
@@ -697,11 +868,99 @@ async def websocket_voice(websocket: WebSocket):
         except Exception as e:
             logger.warning(f"WebSocket send failed (likely closed): {e}")
             return False
+
+    async def send_status(state: str, detail: Optional[str] = None):
+        payload: Dict[str, Any] = {"type": "status", "state": state}
+        if detail:
+            payload["detail"] = detail
+        await safe_send_json(payload)
+
+    processing_lock = asyncio.Lock()
+    medication_stop_event = asyncio.Event()
+    medication_task = asyncio.create_task(_medication_nudge_loop(session_id, safe_send_json, medication_stop_event))
     
     # Buffer to accumulate audio chunks per utterance
     audio_buffer: list[bytes] = []
     silence_task: Optional[asyncio.Task] = None
+    await send_status("connected")
     
+    async def process_complete_audio(complete_audio: bytes, trigger: str):
+        if not complete_audio:
+            return
+
+        if not memory:
+            await safe_send_json({
+                "type": "error",
+                "message": "Memory not initialized",
+            })
+            return
+
+        if not Config.DEEPGRAM_API_KEY:
+            await safe_send_json({
+                "type": "error",
+                "message": "Deepgram API key not configured",
+            })
+            return
+
+        settings = get_effective_settings()
+        patience_mode = settings.get("patience_mode", DEFAULT_PATIENCE_MODE_MS)
+        voice_locale = _normalize_locale(settings.get("voice_locale"))
+
+        async with processing_lock:
+            await send_status("processing", trigger)
+            try:
+                transcript = await transcribe_audio_with_deepgram(
+                    complete_audio,
+                    Config.DEEPGRAM_API_KEY,
+                    "audio/webm;codecs=opus",
+                    patience_mode_ms=patience_mode,
+                    language=voice_locale,
+                )
+            except Exception as e:
+                logger.warning(f"Deepgram transcription error ({trigger}): {e}", exc_info=True)
+                transcript = ""
+
+            if not transcript:
+                await safe_send_json({
+                    "type": "transcript",
+                    "text": "",
+                    "status": "no_speech",
+                })
+                await send_status("listening", trigger)
+                logger.info(f"[WebSocket] No speech detected for session {session_id} (trigger={trigger})")
+                return
+
+            await safe_send_json({
+                "type": "transcript",
+                "text": transcript,
+                "status": "complete",
+            })
+            logger.info(f"[WebSocket] Transcript len={len(transcript)} chars (trigger={trigger}, session={session_id})")
+
+            response_payload = await _build_response_for_transcript(
+                transcript,
+                session_id,
+                trigger,
+            )
+
+            await safe_send_json({
+                "type": "response",
+                "text": response_payload["text"],
+                "sentiment": response_payload["sentiment"],
+            })
+
+            if response_payload.get("audio"):
+                import base64
+                await send_status("ai_speaking", trigger)
+                await safe_send_json({
+                    "type": "audio",
+                    "data": base64.b64encode(response_payload["audio"]).decode("utf-8"),
+                    "format": "wav",
+                    "text": response_payload["text"],  # Include text so frontend can update displayed response
+                })
+
+            await send_status("listening", trigger)
+
     try:
         while True:
             # Receive data from client
@@ -725,213 +984,13 @@ async def websocket_voice(websocket: WebSocket):
                         audio_buffer.clear()
                         logger.info(f"Silence detected, processing utterance of {len(complete_audio)} bytes")
 
-                        # Save received audio to disk for debugging/playback and try to convert to WAV
                         try:
                             saved = _save_and_convert_debug_audio(session_id, 'on_silence', complete_audio, ext_hint='webm')
                             logger.info(f"Saved received audio files: {saved}")
                         except Exception as e:
                             logger.warning(f"Failed to save/convert received audio: {e}")
 
-                        if not memory:
-                            await safe_send_json({
-                                "type": "error",
-                                "message": "Memory not initialized"
-                            })
-                            return
-
-                        try:
-                            # Step 1: Transcribe audio with Deepgram ASR
-                            from src.utils.audio_processor import transcribe_audio_with_deepgram
-                            from src.config import Config
-
-                            if not Config.DEEPGRAM_API_KEY:
-                                await safe_send_json({
-                                    "type": "error",
-                                    "message": "Deepgram API key not configured"
-                                })
-                                return
-
-                            settings = get_effective_settings()
-                            patience_mode = settings.get("patience_mode", Config.PATIENCE_MODE_SILENCE_MS)
-
-                            # Log what we are about to send to Deepgram and handle errors
-                            try:
-                                logger.info(f"Deepgram input (on_silence): {len(complete_audio)} bytes (snippet hex: {complete_audio[:64].hex()})")
-                            except Exception:
-                                logger.info(f"Deepgram input (on_silence): {len(complete_audio)} bytes")
-
-                            try:
-                                transcript = await transcribe_audio_with_deepgram(
-                                    complete_audio,
-                                    Config.DEEPGRAM_API_KEY,
-                                    "audio/webm",
-                                    patience_mode_ms=patience_mode
-                                )
-                            except Exception as e:
-                                logger.warning(f"Deepgram transcription error (on_silence): {e}", exc_info=True)
-                                transcript = ""
-
-                            if not transcript:
-                                logger.info("Deepgram transcript (on_silence): BLANK_OR_EMPTY")
-                                # Inform client that no speech was detected
-                                if not await safe_send_json({
-                                    "type": "transcript",
-                                    "text": "",
-                                    "status": "no_speech"
-                                }):
-                                    return
-
-                                # Fallback: generate a polite prompt and synthesize TTS so client changes to speaking
-                                try:
-                                    fallback_text = "I didn't catch that — could you please repeat?"
-                                    logger.info(f"Generating fallback TTS: {fallback_text}")
-                                    from src.utils.audio_processor import synthesize_speech_with_murf
-                                    settings = get_effective_settings()
-                                    speech_rate = settings.get("speech_rate", 1.0)
-                                    sundowning_hour = settings.get("sundowning_hour", Config.SUNDOWNING_HOUR)
-                                    voice_gender = settings.get("voice_gender", "female")
-
-                                    response_audio = await synthesize_speech_with_murf(
-                                        fallback_text,
-                                        sentiment="neutral",
-                                        api_key=Config.MURF_API_KEY,
-                                        api_url=Config.MURF_API_URL,
-                                        speech_rate=speech_rate,
-                                        sundowning_hour=sundowning_hour,
-                                        voice_gender=voice_gender
-                                    )
-
-                                    import base64
-                                    audio_base64 = base64.b64encode(response_audio).decode('utf-8')
-
-                                    if not await safe_send_json({
-                                        "type": "response",
-                                        "text": fallback_text,
-                                        "sentiment": "neutral"
-                                    }):
-                                        return
-
-                                    if not await safe_send_json({
-                                        "type": "audio",
-                                        "data": audio_base64,
-                                        "format": "wav"
-                                    }):
-                                        return
-                                except Exception as e:
-                                    logger.error(f"Fallback TTS error (on_silence): {e}", exc_info=True)
-                                return
-
-                            logger.info(f"Deepgram transcript (on_silence): '{transcript}'")
-
-                            # Send transcript immediately
-                            if not await safe_send_json({
-                                "type": "transcript",
-                                "text": transcript,
-                                "status": "complete"
-                            }):
-                                return
-
-                            # Step 2: Analyze sentiment
-                            if companion and hasattr(companion, 'sentiment_analyzer'):
-                                sentiment_result = companion.sentiment_analyzer.analyze(transcript)
-                            else:
-                                from src.sentiment.analyzer import SentimentAnalyzer
-                                analyzer = SentimentAnalyzer()
-                                sentiment_result = analyzer.analyze(transcript)
-
-                            # Step 3: Get conversation context
-                            context = memory.get_conversation_context(limit=3)
-
-                            # Step 4: Generate response with Groq LLM
-                            try:
-                                if companion and hasattr(companion, '_generate_response'):
-                                    response_text = await companion._generate_response(
-                                        transcript,
-                                        sentiment_result["sentiment"],
-                                        context
-                                    )
-                                else:
-                                    from src.llm.response_generator import DynamicResponseGenerator
-                                    import os
-                                    llm_provider = os.getenv("LLM_PROVIDER", "groq")
-                                    generator = DynamicResponseGenerator(api_provider=llm_provider)
-                                    response_text = await generator.generate_response(
-                                        transcript,
-                                        sentiment_result["sentiment"],
-                                        context,
-                                        state="idle"
-                                    )
-
-                                if not response_text or response_text.strip() == "":
-                                    raise Exception("LLM returned empty response")
-
-                            except Exception as e:
-                                logger.error(f"Error generating LLM response: {e}", exc_info=True)
-                                await safe_send_json({
-                                    "type": "error",
-                                    "message": f"Failed to generate response: {str(e)}"
-                                })
-                                return
-
-                            # Send response text
-                            if not await safe_send_json({
-                                "type": "response",
-                                "text": response_text,
-                                "sentiment": sentiment_result["sentiment"]
-                            }):
-                                return
-
-                            # Step 5: Synthesize speech with Murf TTS
-                            if Config.MURF_API_KEY:
-                                try:
-                                    from src.utils.audio_processor import synthesize_speech_with_murf
-
-                                    settings = get_effective_settings()
-                                    speech_rate = settings.get("speech_rate", 1.0)
-                                    sundowning_hour = settings.get("sundowning_hour", Config.SUNDOWNING_HOUR)
-                                    voice_gender = settings.get("voice_gender", "female")
-
-                                    response_audio = await synthesize_speech_with_murf(
-                                        response_text,
-                                        sentiment=sentiment_result["sentiment"],
-                                        api_key=Config.MURF_API_KEY,
-                                        api_url=Config.MURF_API_URL,
-                                        speech_rate=speech_rate,
-                                        sundowning_hour=sundowning_hour,
-                                        voice_gender=voice_gender
-                                    )
-
-                                    # Send audio as base64
-                                    import base64
-                                    audio_base64 = base64.b64encode(response_audio).decode('utf-8')
-
-                                    if not await safe_send_json({
-                                        "type": "audio",
-                                        "data": audio_base64,
-                                        "format": "wav"
-                                    }):
-                                        return
-
-                                except Exception as e:
-                                    logger.error(f"TTS error: {e}", exc_info=True)
-                                    await safe_send_json({
-                                        "type": "error",
-                                        "message": f"TTS error: {str(e)}"
-                                    })
-
-                            # Step 6: Save conversation
-                            memory.save_conversation(
-                                transcript,
-                                response_text,
-                                sentiment=sentiment_result["sentiment"]
-                            )
-
-                        except Exception as e:
-                            logger.error(f"Error processing voice message: {e}", exc_info=True)
-                            await safe_send_json({
-                                "type": "error",
-                                "message": str(e)
-                            })
+                        await process_complete_audio(complete_audio, "on_silence")
 
                     silence_task = asyncio.create_task(on_silence())
 
@@ -976,200 +1035,7 @@ async def websocket_voice(websocket: WebSocket):
                         except Exception as e:
                             logger.warning(f"Failed to save/convert received audio: {e}")
 
-                        try:
-                            # Step 1: Transcribe audio with Deepgram ASR
-                            from src.utils.audio_processor import transcribe_audio_with_deepgram
-                            from src.config import Config
-
-                            if not Config.DEEPGRAM_API_KEY:
-                                await safe_send_json({
-                                    "type": "error",
-                                    "message": "Deepgram API key not configured"
-                                })
-                                continue
-
-                            settings = get_effective_settings()
-                            patience_mode = settings.get("patience_mode", Config.PATIENCE_MODE_SILENCE_MS)
-
-                            # Log what we are about to send to Deepgram and handle errors
-                            try:
-                                logger.info(f"Deepgram input (end_of_utterance): {len(complete_audio)} bytes (snippet hex: {complete_audio[:64].hex()})")
-                            except Exception:
-                                logger.info(f"Deepgram input (end_of_utterance): {len(complete_audio)} bytes")
-
-                            try:
-                                # Send full concatenated audio to Deepgram; hint codec for webm/opus
-                                transcript = await transcribe_audio_with_deepgram(
-                                    complete_audio,
-                                    Config.DEEPGRAM_API_KEY,
-                                    "audio/webm;codecs=opus",
-                                    patience_mode_ms=patience_mode
-                                )
-                            except Exception as e:
-                                logger.warning(f"Deepgram transcription error (end_of_utterance): {e}", exc_info=True)
-                                transcript = ""
-
-                            if not transcript:
-                                logger.info("Deepgram transcript (end_of_utterance): BLANK_OR_EMPTY")
-                                # Notify client
-                                if not await safe_send_json({
-                                    "type": "transcript",
-                                    "text": "",
-                                    "status": "no_speech"
-                                }):
-                                    return
-
-                                # Fallback: synthesize a polite prompt so the companion speaks
-                                try:
-                                    fallback_text = "I didn't catch that — could you please repeat?"
-                                    logger.info(f"Generating fallback TTS (end_of_utterance): {fallback_text}")
-                                    from src.utils.audio_processor import synthesize_speech_with_murf
-                                    settings = get_effective_settings()
-                                    speech_rate = settings.get("speech_rate", 1.0)
-                                    sundowning_hour = settings.get("sundowning_hour", Config.SUNDOWNING_HOUR)
-                                    voice_gender = settings.get("voice_gender", "female")
-
-                                    response_audio = await synthesize_speech_with_murf(
-                                        fallback_text,
-                                        sentiment="neutral",
-                                        api_key=Config.MURF_API_KEY,
-                                        api_url=Config.MURF_API_URL,
-                                        speech_rate=speech_rate,
-                                        sundowning_hour=sundowning_hour,
-                                        voice_gender=voice_gender
-                                    )
-
-                                    import base64
-                                    audio_base64 = base64.b64encode(response_audio).decode('utf-8')
-
-                                    if not await safe_send_json({
-                                        "type": "response",
-                                        "text": fallback_text,
-                                        "sentiment": "neutral"
-                                    }):
-                                        return
-
-                                    if not await safe_send_json({
-                                        "type": "audio",
-                                        "data": audio_base64,
-                                        "format": "wav"
-                                    }):
-                                        return
-                                except Exception as e:
-                                    logger.error(f"Fallback TTS error (end_of_utterance): {e}", exc_info=True)
-                                continue
-
-                            logger.info(f"Deepgram transcript (end_of_utterance): '{transcript}'")
-
-                            # Send transcript immediately
-                            if not await safe_send_json({
-                                "type": "transcript",
-                                "text": transcript,
-                                "status": "complete"
-                            }):
-                                return
-
-                            # Step 2: Analyze sentiment
-                            if companion and hasattr(companion, 'sentiment_analyzer'):
-                                sentiment_result = companion.sentiment_analyzer.analyze(transcript)
-                            else:
-                                from src.sentiment.analyzer import SentimentAnalyzer
-                                analyzer = SentimentAnalyzer()
-                                sentiment_result = analyzer.analyze(transcript)
-
-                            # Step 3: Get conversation context
-                            context = memory.get_conversation_context(limit=3)
-
-                            # Step 4: Generate response with Groq LLM
-                            try:
-                                if companion and hasattr(companion, '_generate_response'):
-                                    response_text = await companion._generate_response(
-                                        transcript,
-                                        sentiment_result["sentiment"],
-                                        context
-                                    )
-                                else:
-                                    from src.llm.response_generator import DynamicResponseGenerator
-                                    import os
-                                    llm_provider = os.getenv("LLM_PROVIDER", "groq")
-                                    generator = DynamicResponseGenerator(api_provider=llm_provider)
-                                    response_text = await generator.generate_response(
-                                        transcript,
-                                        sentiment_result["sentiment"],
-                                        context,
-                                        state="idle"
-                                    )
-
-                                if not response_text or response_text.strip() == "":
-                                    raise Exception("LLM returned empty response")
-
-                            except Exception as e:
-                                logger.error(f"Error generating LLM response: {e}", exc_info=True)
-                                await safe_send_json({
-                                    "type": "error",
-                                    "message": f"Failed to generate response: {str(e)}"
-                                })
-                                continue
-
-                            # Send response text
-                            if not await safe_send_json({
-                                "type": "response",
-                                "text": response_text,
-                                "sentiment": sentiment_result["sentiment"]
-                            }):
-                                return
-
-                            # Step 5: Synthesize speech with Murf TTS
-                            if Config.MURF_API_KEY:
-                                try:
-                                    from src.utils.audio_processor import synthesize_speech_with_murf
-
-                                    settings = get_effective_settings()
-                                    speech_rate = settings.get("speech_rate", 1.0)
-                                    sundowning_hour = settings.get("sundowning_hour", Config.SUNDOWNING_HOUR)
-                                    voice_gender = settings.get("voice_gender", "female")
-
-                                    response_audio = await synthesize_speech_with_murf(
-                                        response_text,
-                                        sentiment=sentiment_result["sentiment"],
-                                        api_key=Config.MURF_API_KEY,
-                                        api_url=Config.MURF_API_URL,
-                                        speech_rate=speech_rate,
-                                        sundowning_hour=sundowning_hour,
-                                        voice_gender=voice_gender
-                                    )
-
-                                    # Send audio as base64
-                                    import base64
-                                    audio_base64 = base64.b64encode(response_audio).decode('utf-8')
-
-                                    if not await safe_send_json({
-                                        "type": "audio",
-                                        "data": audio_base64,
-                                        "format": "wav"
-                                    }):
-                                        return
-
-                                except Exception as e:
-                                    logger.error(f"TTS error: {e}", exc_info=True)
-                                    await safe_send_json({
-                                        "type": "error",
-                                        "message": f"TTS error: {str(e)}"
-                                    })
-
-                            # Step 6: Save conversation
-                            memory.save_conversation(
-                                transcript,
-                                response_text,
-                                sentiment=sentiment_result["sentiment"]
-                            )
-
-                        except Exception as e:
-                            logger.error(f"Error processing voice message: {e}", exc_info=True)
-                            await safe_send_json({
-                                "type": "error",
-                                "message": str(e)
-                            })
+                        await process_complete_audio(complete_audio, "end_of_utterance")
                     elif message.get("type") == "close":
                         break
                         
@@ -1188,6 +1054,11 @@ async def websocket_voice(websocket: WebSocket):
         except:
             pass
     finally:
+        medication_stop_event.set()
+        try:
+            await medication_task
+        except Exception:
+            medication_task.cancel()
         if session_id in active_sessions:
             del active_sessions[session_id]
         logger.info(f"WebSocket session closed: {session_id}")
@@ -1195,41 +1066,40 @@ async def websocket_voice(websocket: WebSocket):
 # Settings endpoints
 @app.get("/settings")
 async def get_settings():
-    """Get current settings from database or return defaults."""
+    """Get current settings from database, initializing with defaults if empty."""
+    # Hardcoded defaults (not from .env)
+    default_settings = {
+        "volume": 80,
+        "speech_rate": 1.0,
+        "patience_mode": DEFAULT_PATIENCE_MODE_MS,
+        "sundowning_hour": DEFAULT_SUNDOWNING_HOUR,
+        "medication_reminders_enabled": True,
+        "word_of_day_enabled": True,
+        "voice_gender": "female",
+        "voice_locale": DEFAULT_VOICE_LOCALE,
+    }
+    
     if not memory:
         # Return defaults if memory not initialized
-        return {
-            "volume": 80,
-            "speech_rate": 1.0,
-            "patience_mode": Config.PATIENCE_MODE_SILENCE_MS,
-            "sundowning_hour": Config.SUNDOWNING_HOUR,
-            "medication_reminders_enabled": True,
-            "word_of_day_enabled": True,
-            "voice_gender": "female",
-        }
+        return default_settings
     
     # Load settings from database
     saved_settings = memory.get_settings()
     
-    # Merge with defaults (saved settings take precedence)
-    default_settings = {
-        "volume": 80,
-        "speech_rate": 1.0,
-        "patience_mode": Config.PATIENCE_MODE_SILENCE_MS,
-        "sundowning_hour": Config.SUNDOWNING_HOUR,
-        "medication_reminders_enabled": True,
-        "word_of_day_enabled": True,
-        "voice_gender": "female",
-    }
+    # If database is empty (first run), initialize with defaults
+    if not saved_settings:
+        logger.info("Database settings empty - initializing with hardcoded defaults")
+        memory.save_settings(default_settings)
+        return default_settings
     
-    # Update defaults with saved settings
+    # Update defaults with saved settings (database takes precedence)
     default_settings.update(saved_settings)
     
     return default_settings
 
 @app.patch("/settings")
 async def update_settings(settings: Settings):
-    """Update settings and save to database."""
+    """Update settings and save to database. Only saves changed fields (partial update)."""
     if not memory:
         raise HTTPException(status_code=503, detail="Memory not initialized")
     
@@ -1240,14 +1110,16 @@ async def update_settings(settings: Settings):
         logger.info(f"Received settings update request: {list(settings_dict.keys())}")
         logger.debug(f"Settings values: {settings_dict}")
         
-        # Save to database
+        # Save only the changed fields (partial update) - this is faster and more efficient
+        # The database will update only these keys, leaving others unchanged
         memory.save_settings(settings_dict)
         
-        # Verify it was saved by reading it back
+        # Immediately reload from database to verify and return current state
         saved = memory.get_settings()
         logger.info(f"Settings saved successfully. Retrieved from DB: {list(saved.keys())}")
+        logger.debug(f"All current settings: {saved}")
         
-        return {"status": "updated", "settings": settings_dict}
+        return {"status": "updated", "settings": saved}
     except Exception as e:
         logger.error(f"Error updating settings: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to save settings: {str(e)}")

@@ -21,11 +21,18 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
   const [transcript, setTranscript] = useState('')
   const [aiResponse, setAiResponse] = useState('')
   const [error, setError] = useState<string | null>(null)
+  // Track if we've sent the WebM header (first chunk) - must persist across re-renders
+  const headerSentRef = useRef(false)
   const [wsConnected, setWsConnected] = useState(false)
   const [userVolume, setUserVolume] = useState(80)
+  const defaultPatienceMs = Number(process.env.NEXT_PUBLIC_PATIENCE_MS || 2000)
+  const [patienceMs, setPatienceMs] = useState(defaultPatienceMs)
+  const enableWsAudioStreaming = process.env.NEXT_PUBLIC_ENABLE_WS_AUDIO_STREAM === 'true'
+  const MIN_HTTP_AUDIO_BYTES = 8000
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
+  const webmHeaderRef = useRef<Blob | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const currentAudioRef = useRef<HTMLAudioElement | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -37,6 +44,7 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
   const inSpeechRef = useRef(false)
   const lastVoiceTimestampRef = useRef<number>(0)
   const pendingTranscriptRef = useRef(false)
+  const suppressRecordingRef = useRef(false)
 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
   // Convert HTTP URL to WebSocket URL - handle both http and https
@@ -58,8 +66,125 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
       if (typeof settings.volume === 'number') {
         setUserVolume(settings.volume)
       }
+      if (typeof settings.patience_mode === 'number') {
+        setPatienceMs(settings.patience_mode)
+      }
     } catch (err) {
       console.error('[VoiceInterface] Failed to load settings:', err)
+    }
+  }
+
+  const playBase64Audio = async (base64Data: string, format: string = 'wav') => {
+    if (!base64Data) return
+    const audioBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0))
+    const audioBlob = new Blob([audioBytes], { type: `audio/${format || 'wav'}` })
+    const audioUrl = URL.createObjectURL(audioBlob)
+
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause()
+      currentAudioRef.current = null
+    }
+
+    const audio = new Audio(audioUrl)
+    audio.volume = Math.min(Math.max(userVolume / 100, 0), 1)
+    currentAudioRef.current = audio
+    setIsSpeaking(true)
+    suppressRecordingRef.current = true
+    audioChunksRef.current = []
+    console.log('[VoiceInterface] Suppressing mic capture while AI speaks')
+
+    return new Promise<void>((resolve) => {
+      audio.onended = () => {
+        setIsSpeaking(false)
+        URL.revokeObjectURL(audioUrl)
+        currentAudioRef.current = null
+        audioChunksRef.current = []
+        suppressRecordingRef.current = false
+        console.log('[VoiceInterface] AI speech ended; mic capture resumes')
+        resolve()
+      }
+
+      audio.onerror = () => {
+        setIsSpeaking(false)
+        URL.revokeObjectURL(audioUrl)
+        currentAudioRef.current = null
+        audioChunksRef.current = []
+        setError('Error playing audio')
+        suppressRecordingRef.current = false
+        console.warn('[VoiceInterface] Audio playback error; mic capture resumes')
+        resolve()
+      }
+
+      audio.play().catch(err => {
+        console.error('[VoiceInterface] Failed to play audio', err)
+        setIsSpeaking(false)
+        URL.revokeObjectURL(audioUrl)
+        currentAudioRef.current = null
+        audioChunksRef.current = []
+        setError('Error playing audio')
+        suppressRecordingRef.current = false
+        console.warn('[VoiceInterface] Audio play() failed; mic capture resumes')
+        resolve()
+      })
+    })
+  }
+
+  const processUtteranceViaHttp = async (chunks: Blob[]) => {
+    if (!sessionIdRef.current) {
+      setError('Voice session not initialized.')
+      setIsProcessing(false)
+      pendingTranscriptRef.current = false
+      return
+    }
+
+    if (!chunks || !chunks.length) {
+      setIsProcessing(false)
+      pendingTranscriptRef.current = false
+      return
+    }
+
+    const payloadChunks =
+      chunks.length > 0
+        ? (webmHeaderRef.current ? [webmHeaderRef.current, ...chunks] : chunks)
+        : []
+
+    if (payloadChunks.length === 0) {
+      console.log('[VoiceInterface] No audio chunks to upload; skipping.')
+      setIsProcessing(false)
+      pendingTranscriptRef.current = false
+      return
+    }
+
+    const blob = new Blob(payloadChunks, { type: 'audio/webm;codecs=opus' })
+    if (blob.size < MIN_HTTP_AUDIO_BYTES) {
+      console.warn(`[VoiceInterface] Audio too small to transcribe (${blob.size} bytes)`)
+      setIsProcessing(false)
+      pendingTranscriptRef.current = false
+      return
+    }
+    console.log(`[VoiceInterface] Uploading HTTP utterance: ${blob.size} bytes from ${chunks.length} chunks (header included=${!!webmHeaderRef.current})`)
+
+    try {
+      const resp = await apiClient.sendVoiceMessage(sessionIdRef.current, blob)
+      setTranscript(resp.transcript || '')
+      setAiResponse(resp.response || '')
+      console.log('[VoiceInterface] HTTP response received', {
+        transcriptLength: resp.transcript?.length || 0,
+        responseLength: resp.response?.length || 0,
+        hasAudio: Boolean(resp.response_audio),
+      })
+      pendingTranscriptRef.current = false
+      setIsProcessing(false)
+
+      if (resp.response_audio) {
+        await playBase64Audio(resp.response_audio, resp.response_audio_format || 'wav')
+      }
+    } catch (err: any) {
+      console.error('[VoiceInterface] sendVoiceMessage failed', err)
+      setError(err.message || 'Failed to process voice message.')
+      pendingTranscriptRef.current = false
+      setIsProcessing(false)
+      setIsSpeaking(false)
     }
   }
 
@@ -111,8 +236,8 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
           console.log('[WebSocket] Connected successfully')
           setWsConnected(true)
           setError(null)
-          // Create a backend voice session for fallback POST uploads
-          (async () => {
+          // Create a backend voice session for WebSocket communication
+          ;(async () => {
             try {
               const sess = await apiClient.startVoiceSession()
               if (sess && sess.session_id) {
@@ -131,10 +256,35 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
             console.log('[WebSocket] Message received:', message.type)
 
             switch (message.type) {
+              case 'status':
+                if (message.state === 'processing') {
+                  setIsProcessing(true)
+                } else if (message.state === 'ai_speaking') {
+                  setIsSpeaking(true)
+                } else if (message.state === 'listening') {
+                  setIsProcessing(false)
+                  setIsSpeaking(false)
+                }
+                break
+
+              case 'patience_prompt':
+                if (message.text) {
+                  setAiResponse(message.text)
+                }
+                setIsProcessing(false)
+                break
+
+              case 'medication_nudge':
+                if (message.text) {
+                  setAiResponse(message.text)
+                }
+                setIsProcessing(false)
+                break
+
               case 'transcript':
                 // Handle server transcript messages. Server may send status 'no_speech'.
                 if (message.status === 'no_speech') {
-                  // Server detected no speech — show processing/loading while server may synthesize fallback TTS
+                  // Server detected no speech — show processing/loading
                   pendingTranscriptRef.current = false
                   setIsProcessing(true)
                   // Keep listening active but forwarding is gated by VAD + isSpeaking flag
@@ -151,45 +301,14 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
                 setIsProcessing(false)
                 break
 
-                case 'audio':
+              case 'audio':
                 if (message.data) {
-                  // When the companion speaks, pause sending audio to the server
-                  // so the server can generate TTS without getting loopback.
-                      pendingTranscriptRef.current = false
-                      // Stop showing processing/loading when audio starts
-                      setIsProcessing(false)
-                      setIsSpeaking(true)
-
-                  // Convert base64 to audio
-                  const audioBytes = Uint8Array.from(atob(message.data), c => c.charCodeAt(0))
-                  const audioBlob = new Blob([audioBytes], { type: `audio/${message.format || 'wav'}` })
-                  const audioUrl = URL.createObjectURL(audioBlob)
-
-                  // Stop any existing audio
-                  if (currentAudioRef.current) {
-                    currentAudioRef.current.pause()
-                    currentAudioRef.current = null
+                  pendingTranscriptRef.current = false
+                  setIsProcessing(false)
+                  if (message.text) {
+                    setAiResponse(message.text)
                   }
-
-                  const audio = new Audio(audioUrl)
-                  audio.volume = Math.min(Math.max(userVolume / 100, 0), 1)
-                  currentAudioRef.current = audio
-
-                  audio.onended = () => {
-                    setIsSpeaking(false)
-                    URL.revokeObjectURL(audioUrl)
-                    currentAudioRef.current = null
-                    // keep listening active; forwarding will resume automatically when VAD detects speech
-                  }
-
-                  audio.onerror = () => {
-                    setIsSpeaking(false)
-                    URL.revokeObjectURL(audioUrl)
-                    currentAudioRef.current = null
-                    setError('Error playing audio')
-                  }
-
-                  await audio.play()
+                  await playBase64Audio(message.data, message.format || 'wav')
                 }
                 break
 
@@ -284,9 +403,18 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
       setTranscript('')
       setAiResponse('')
       
+      if (!sessionIdRef.current) {
+        try {
+          const sess = await apiClient.startVoiceSession()
+          sessionIdRef.current = sess.session_id
+        } catch (err: any) {
+          setError(err?.message || 'Failed to start voice session.')
+          return
+        }
+      }
+
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        setError('Not connected to server. Please wait...')
-        return
+        console.warn('[VoiceInterface] WebSocket not connected - continuing with HTTP-only mode')
       }
 
       // Request microphone access
@@ -313,12 +441,19 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
         // VAD parameters
         const VAD_THRESHOLD = 0.02 // RMS threshold
         const VAD_MIN_SPEECH_MS = 150 // require 150ms above threshold to start
-        const VAD_SILENCE_MS = Number(process.env.NEXT_PUBLIC_PATIENCE_MS || 2000) // 2s default
+        const VAD_SILENCE_MS = patienceMs || 2000
 
         let speechStartCandidate = 0
         lastVoiceTimestampRef.current = Date.now()
 
         vadIntervalRef.current = window.setInterval(() => {
+          if (suppressRecordingRef.current) {
+            if (inSpeechRef.current) {
+              inSpeechRef.current = false
+            }
+            speechStartCandidate = 0
+            return
+          }
           try {
             const bufferLength = analyser.fftSize
             const data = new Float32Array(bufferLength)
@@ -329,7 +464,7 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
             }
             const rms = Math.sqrt(sum / bufferLength)
 
-            const now = Date.now()
+        const now = Date.now()
             if (rms > VAD_THRESHOLD) {
               // possible speech
               if (!inSpeechRef.current) {
@@ -337,6 +472,7 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
                 if (now - speechStartCandidate > VAD_MIN_SPEECH_MS) {
                   inSpeechRef.current = true
                   lastVoiceTimestampRef.current = now
+                  console.log('[VoiceInterface] VAD: speech detected')
                   // If the companion is speaking or processing and user begins to speak,
                   // interrupt playback so user speech can take priority.
                   if (isSpeaking) {
@@ -365,43 +501,28 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
                 // check if silence duration exceeded
                 if (now - lastVoiceTimestampRef.current > VAD_SILENCE_MS) {
                   inSpeechRef.current = false
+                  console.log('[VoiceInterface] VAD: silence threshold reached; preparing upload', {
+                    inSpeech: inSpeechRef.current,
+                    isSpeaking,
+                    isProcessing,
+                    chunks: audioChunksRef.current.length,
+                  })
                   // trigger end of utterance: send control message but keep listening
                   setIsProcessing(true)
                   pendingTranscriptRef.current = true
-                  if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                  if (enableWsAudioStreaming && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                     try {
                       console.log('[VoiceInterface] Sending end_of_utterance')
                       wsRef.current.send(JSON.stringify({ type: 'end_of_utterance' }))
                     } catch (e) {
                       console.error('[VoiceInterface] Failed to send end_of_utterance', e)
                     }
-                  }
-
-                  // Also POST accumulated chunks as a single Blob fallback (multipart/form-data)
-                  try {
+                  } else {
                     const chunks = audioChunksRef.current.slice()
-                    if (chunks && chunks.length > 0 && sessionIdRef.current) {
-                      const blob = new Blob(chunks, { type: 'audio/webm' })
-                      console.log('[VoiceInterface] Fallback: POSTing final blob', blob.size)
-                      // fire-and-forget, update processing state
-                      apiClient.sendVoiceMessage(sessionIdRef.current, blob)
-                        .then((resp) => {
-                          if (resp && resp.transcript) {
-                            setTranscript(resp.transcript)
-                            setAiResponse(resp.response || '')
-                          }
-                        })
-                        .catch(err => {
-                          console.warn('[VoiceInterface] sendVoiceMessage fallback failed', err)
-                        })
-                        .finally(() => {
-                          // keep show processing until server sends websocket response
-                        })
-                    }
-                  } catch (e) {
-                    console.error('[VoiceInterface] Fallback POST failed', e)
+                    audioChunksRef.current = []
+                    headerSentRef.current = false
+                    processUtteranceViaHttp(chunks)
                   }
-                  // Continue listening and streaming; the server will process the buffered audio
                 }
               }
             }
@@ -420,16 +541,36 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
       
       mediaRecorderRef.current = mediaRecorder
       audioChunksRef.current = []
-
+      webmHeaderRef.current = null
+      // Reset header flag when starting new recording session
+      headerSentRef.current = false
+      
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
-          // Accumulate chunks and stream in real-time
-          audioChunksRef.current.push(event.data)
-          // only forward chunks when VAD indicates speech and not currently speaking or processing
-          const shouldForward = inSpeechRef.current && !isSpeaking && !isProcessing
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && shouldForward) {
+          if (!webmHeaderRef.current) {
+            webmHeaderRef.current = event.data
+            console.log(`[VoiceInterface] Captured WebM header chunk: ${event.data.size} bytes`)
+          } else if (!suppressRecordingRef.current) {
+            audioChunksRef.current.push(event.data)
+          } else {
+            console.log(`[VoiceInterface] Dropping chunk (${event.data.size} bytes) while AI speaks`)
+          }
+          
+          // Always send the first chunk (contains WebM header) - critical for valid WebM file
+          // After that, only forward chunks when VAD indicates speech and not currently speaking or processing
+          const isFirstChunk = !headerSentRef.current
+          const shouldForward =
+            enableWsAudioStreaming &&
+            (isFirstChunk || (inSpeechRef.current && !isSpeaking && !isProcessing))
+          
+          if (enableWsAudioStreaming && wsRef.current && wsRef.current.readyState === WebSocket.OPEN && shouldForward) {
             try {
-              console.log(`[VoiceInterface] Sending audio chunk: ${event.data.size} bytes`)
+              if (isFirstChunk) {
+                console.log(`[VoiceInterface] Sending first chunk (WebM header): ${event.data.size} bytes`)
+                headerSentRef.current = true
+              } else {
+                console.log(`[VoiceInterface] Sending audio chunk: ${event.data.size} bytes`)
+              }
               wsRef.current.send(event.data)
             } catch (e) {
               console.error('[VoiceInterface] Failed to send audio chunk', e)
@@ -444,6 +585,7 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
         streamRef.current = null
         
         audioChunksRef.current = []
+        headerSentRef.current = false
         setIsListening(false)
         isRecordingRef.current = false
       }
@@ -498,7 +640,8 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
       }, 300)
       return () => clearTimeout(t)
     }
-  }, [wsConnected])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsConnected, isListening, isSpeaking])
 
   // Compute classes for the main voice button to avoid large inline template literals in JSX
   const buttonClass = (() => {
@@ -653,6 +796,7 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
             {isSpeaking ? 'Speaking' : 'Silent'}
           </span>
         </div>
+      </div>
       </div>
     </div>
   )

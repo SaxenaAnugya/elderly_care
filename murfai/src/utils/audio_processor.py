@@ -44,7 +44,13 @@ def _ffmpeg_reencode_to_wav(input_bytes: bytes) -> Optional[bytes]:
         return None
 
 
-async def transcribe_audio_with_deepgram(audio_data: bytes, api_key: str, content_type: str = "audio/webm", patience_mode_ms: Optional[int] = None) -> str:
+async def transcribe_audio_with_deepgram(
+    audio_data: bytes,
+    api_key: str,
+    content_type: str = "audio/webm",
+    patience_mode_ms: Optional[int] = None,
+    language: Optional[str] = None
+) -> str:
     """
     Transcribe audio using Deepgram REST API.
 
@@ -71,7 +77,11 @@ async def transcribe_audio_with_deepgram(audio_data: bytes, api_key: str, conten
             logger.info(f"transcribe_audio_with_deepgram input: {len(audio_data)} bytes")
 
         # Deepgram API endpoint with parameters
-        url = f"https://api.deepgram.com/v1/listen?model={Config.ASR_MODEL}&language=en-US&punctuate=true&interim_results=false"
+        language_param = (language or Config.DEFAULT_VOICE_LOCALE or "en-US")
+        url = (
+            "https://api.deepgram.com/v1/listen"
+            f"?model={Config.ASR_MODEL}&language={language_param}&punctuate=true&interim_results=false"
+        )
 
         # Some browsers send just 'audio/webm' — Deepgram prefers codec when available
         ct = content_type
@@ -191,7 +201,16 @@ async def transcribe_audio_with_deepgram(audio_data: bytes, api_key: str, conten
         logger.error(f"Error transcribing audio: {e}", exc_info=True)
         return ""
 
-async def synthesize_speech_with_murf(text: str, sentiment: str = "neutral", api_key: str = None, api_url: str = None, speech_rate: Optional[float] = None, sundowning_hour: Optional[int] = None, voice_gender: Optional[str] = None) -> bytes:
+async def synthesize_speech_with_murf(
+    text: str,
+    sentiment: str = "neutral",
+    api_key: str = None,
+    api_url: str = None,
+    speech_rate: Optional[float] = None,
+    sundowning_hour: Optional[int] = None,
+    voice_gender: Optional[str] = None,
+    voice_locale: Optional[str] = None
+) -> bytes:
     """
     Synthesize speech using Murf TTS API.
     
@@ -221,7 +240,8 @@ async def synthesize_speech_with_murf(text: str, sentiment: str = "neutral", api
             sentiment=sentiment,
             speech_rate=speech_rate,
             sundowning_hour=sundowning_hour,
-            voice_gender=voice_gender
+            voice_gender=voice_gender,
+            voice_locale=voice_locale or Config.DEFAULT_VOICE_LOCALE
         )
         await tts_client.close()
         
