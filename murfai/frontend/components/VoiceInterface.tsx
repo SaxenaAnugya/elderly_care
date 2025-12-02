@@ -75,58 +75,99 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
   }
 
   const playBase64Audio = async (base64Data: string, format: string = 'wav') => {
-    if (!base64Data) return
-    const audioBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0))
-    const audioBlob = new Blob([audioBytes], { type: `audio/${format || 'wav'}` })
-    const audioUrl = URL.createObjectURL(audioBlob)
-
-    if (currentAudioRef.current) {
-      currentAudioRef.current.pause()
-      currentAudioRef.current = null
+    if (!base64Data || !base64Data.trim()) {
+      console.warn('[VoiceInterface] No audio data provided to playBase64Audio')
+      return
     }
 
-    const audio = new Audio(audioUrl)
-    audio.volume = Math.min(Math.max(userVolume / 100, 0), 1)
-    currentAudioRef.current = audio
-    setIsSpeaking(true)
-    suppressRecordingRef.current = true
-    audioChunksRef.current = []
-    console.log('[VoiceInterface] Suppressing mic capture while AI speaks')
-
-    return new Promise<void>((resolve) => {
-      audio.onended = () => {
-        setIsSpeaking(false)
-        URL.revokeObjectURL(audioUrl)
-        currentAudioRef.current = null
-        audioChunksRef.current = []
-        suppressRecordingRef.current = false
-        console.log('[VoiceInterface] AI speech ended; mic capture resumes')
-        resolve()
+    try {
+      console.log(`[VoiceInterface] Playing audio: ${base64Data.length} chars, format: ${format}`)
+      
+      // Decode base64
+      const audioBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0))
+      console.log(`[VoiceInterface] Decoded audio: ${audioBytes.length} bytes`)
+      
+      if (audioBytes.length === 0) {
+        console.error('[VoiceInterface] Decoded audio is empty')
+        setError('Audio data is empty')
+        return
       }
 
-      audio.onerror = () => {
-        setIsSpeaking(false)
-        URL.revokeObjectURL(audioUrl)
+      // Create blob with proper MIME type
+      const mimeType = format === 'wav' ? 'audio/wav' : `audio/${format}`
+      const audioBlob = new Blob([audioBytes], { type: mimeType })
+      console.log(`[VoiceInterface] Created audio blob: ${audioBlob.size} bytes, type: ${mimeType}`)
+      
+      const audioUrl = URL.createObjectURL(audioBlob)
+
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause()
         currentAudioRef.current = null
-        audioChunksRef.current = []
-        setError('Error playing audio')
-        suppressRecordingRef.current = false
-        console.warn('[VoiceInterface] Audio playback error; mic capture resumes')
-        resolve()
       }
 
-      audio.play().catch(err => {
-        console.error('[VoiceInterface] Failed to play audio', err)
-        setIsSpeaking(false)
-        URL.revokeObjectURL(audioUrl)
-        currentAudioRef.current = null
-        audioChunksRef.current = []
-        setError('Error playing audio')
-        suppressRecordingRef.current = false
-        console.warn('[VoiceInterface] Audio play() failed; mic capture resumes')
-        resolve()
+      const audio = new Audio(audioUrl)
+      audio.volume = Math.min(Math.max(userVolume / 100, 0), 1)
+      currentAudioRef.current = audio
+      setIsSpeaking(true)
+      suppressRecordingRef.current = true
+      audioChunksRef.current = []
+      console.log('[VoiceInterface] Suppressing mic capture while AI speaks')
+
+      return new Promise<void>((resolve) => {
+        audio.onloadeddata = () => {
+          console.log('[VoiceInterface] Audio loaded successfully, duration:', audio.duration)
+        }
+
+        audio.oncanplay = () => {
+          console.log('[VoiceInterface] Audio can play')
+        }
+
+        audio.onended = () => {
+          setIsSpeaking(false)
+          URL.revokeObjectURL(audioUrl)
+          currentAudioRef.current = null
+          audioChunksRef.current = []
+          suppressRecordingRef.current = false
+          console.log('[VoiceInterface] AI speech ended; mic capture resumes')
+          resolve()
+        }
+
+        audio.onerror = (e) => {
+          console.error('[VoiceInterface] Audio playback error:', e, {
+            error: audio.error,
+            code: audio.error?.code,
+            message: audio.error?.message
+          })
+          setIsSpeaking(false)
+          URL.revokeObjectURL(audioUrl)
+          currentAudioRef.current = null
+          audioChunksRef.current = []
+          setError(`Error playing audio: ${audio.error?.message || 'Unknown error'}`)
+          suppressRecordingRef.current = false
+          console.warn('[VoiceInterface] Audio playback error; mic capture resumes')
+          resolve()
+        }
+
+        audio.play().then(() => {
+          console.log('[VoiceInterface] Audio playback started successfully')
+        }).catch(err => {
+          console.error('[VoiceInterface] Failed to play audio', err)
+          setIsSpeaking(false)
+          URL.revokeObjectURL(audioUrl)
+          currentAudioRef.current = null
+          audioChunksRef.current = []
+          setError(`Error playing audio: ${err.message || 'Playback failed'}`)
+          suppressRecordingRef.current = false
+          console.warn('[VoiceInterface] Audio play() failed; mic capture resumes')
+          resolve()
+        })
       })
-    })
+    } catch (err: any) {
+      console.error('[VoiceInterface] Error in playBase64Audio:', err)
+      setError(`Failed to process audio: ${err.message || 'Unknown error'}`)
+      setIsSpeaking(false)
+      suppressRecordingRef.current = false
+    }
   }
 
   const processUtteranceViaHttp = async (chunks: Blob[]) => {
@@ -177,7 +218,18 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
       setIsProcessing(false)
 
       if (resp.response_audio) {
-        await playBase64Audio(resp.response_audio, resp.response_audio_format || 'wav')
+        console.log('[VoiceInterface] HTTP response has audio:', {
+          audioLength: resp.response_audio.length,
+          format: resp.response_audio_format
+        })
+        try {
+          await playBase64Audio(resp.response_audio, resp.response_audio_format || 'wav')
+        } catch (err: any) {
+          console.error('[VoiceInterface] Error playing HTTP audio:', err)
+          setError(`Failed to play audio: ${err.message || 'Unknown error'}`)
+        }
+      } else {
+        console.warn('[VoiceInterface] HTTP response has no audio data')
       }
     } catch (err: any) {
       console.error('[VoiceInterface] sendVoiceMessage failed', err)
@@ -302,13 +354,27 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
                 break
 
               case 'audio':
+                console.log('[WebSocket] Received audio message:', {
+                  hasData: !!message.data,
+                  dataLength: message.data?.length || 0,
+                  format: message.format,
+                  hasText: !!message.text
+                })
                 if (message.data) {
                   pendingTranscriptRef.current = false
                   setIsProcessing(false)
                   if (message.text) {
                     setAiResponse(message.text)
                   }
-                  await playBase64Audio(message.data, message.format || 'wav')
+                  try {
+                    await playBase64Audio(message.data, message.format || 'wav')
+                  } catch (err: any) {
+                    console.error('[WebSocket] Error playing audio:', err)
+                    setError(`Failed to play audio: ${err.message || 'Unknown error'}`)
+                  }
+                } else {
+                  console.warn('[WebSocket] Audio message received but no data field')
+                  setError('Audio data missing from server response')
                 }
                 break
 
@@ -658,7 +724,7 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
   // relying on a parent ref to prevent runtime errors.
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-gradient-to-br from-indigo-50 via-white to-rose-50">
+    <div className="min-h-screen flex flex-col items-center justify-center p-6">
       <div className="absolute top-6 left-6">
         <div className="flex items-center gap-3">
           <div className="w-14 h-14 rounded-full bg-gradient-to-br from-purple-600 to-indigo-500 shadow-lg flex items-center justify-center text-white text-2xl font-semibold">YC</div>
@@ -675,9 +741,6 @@ export default function VoiceInterface({ voiceGender }: VoiceInterfaceProps) {
         <h1 className="text-6xl font-semibold text-gray-900 mb-2 tracking-wide" role="heading" aria-level={1}>
           Your Companion
         </h1>
-        <p className="text-2xl text-gray-700 font-medium" aria-hidden={false}>
-          {voiceGender === 'female' ? 'Warm and caring' : 'Calm and reassuring'}
-        </p>
       </div>
 
       {/* Connection Status */}

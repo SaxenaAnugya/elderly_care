@@ -18,6 +18,7 @@ export default function MedicationReminders() {
   const [formData, setFormData] = useState({
     medication_name: '',
     time: '',
+    days: [] as string[],
   })
 
   useEffect(() => {
@@ -34,10 +35,22 @@ export default function MedicationReminders() {
 
   const loadMedications = async () => {
     try {
+      setLoading(true)
       const data = await apiClient.getMedications()
-      setMedications(data)
+      console.log('Loaded medications:', data)
+      // Ensure we have an array and sort by time
+      const meds = Array.isArray(data) ? data : []
+      const sorted = meds.sort((a, b) => {
+        const timeA = a.time || ''
+        const timeB = b.time || ''
+        return timeA.localeCompare(timeB)
+      })
+      setMedications(sorted)
+      console.log('Set medications:', sorted.length, 'items')
     } catch (error) {
       console.error('Failed to load medications:', error)
+      setError('Failed to load medications. Please refresh the page.')
+      setMedications([])
     } finally {
       setLoading(false)
     }
@@ -63,19 +76,44 @@ export default function MedicationReminders() {
     }
     
     setSaving(true)
+    setError(null)
+    setSuccess(null)
     try {
+      const medicationData = {
+        medication_name: formData.medication_name.trim(),
+        time: formData.time,
+        days: formData.days.length > 0 ? formData.days.join(',') : null
+      }
+      
+      console.log('Saving medication:', medicationData)
+      
       if (editingId) {
-        await apiClient.updateMedication(editingId, formData)
+        await apiClient.updateMedication(editingId, medicationData)
         setSuccess('Medication updated successfully!')
         setEditingId(null)
       } else {
-        const result = await apiClient.addMedication(formData)
+        const result = await apiClient.addMedication(medicationData)
         console.log('Medication added:', result)
         setSuccess('Medication added successfully!')
+        
+        // Add the new medication to the list immediately if it has an ID
+        if (result && result.id) {
+          setMedications(prev => [...prev, result].sort((a, b) => {
+            // Sort by time
+            const timeA = a.time || ''
+            const timeB = b.time || ''
+            return timeA.localeCompare(timeB)
+          }))
+        }
       }
-      setFormData({ medication_name: '', time: '' })
+      
+      setFormData({ medication_name: '', time: '', days: [] })
       setShowAddForm(false)
-      // Reload medications to show the new one
+      
+      // Small delay to ensure database write completes
+      await new Promise(resolve => setTimeout(resolve, 100))
+      
+      // Reload medications to ensure we have the latest data
       await loadMedications()
       
       // Clear success message after 3 seconds
@@ -93,6 +131,7 @@ export default function MedicationReminders() {
     setFormData({
       medication_name: med.medication_name,
       time: med.time,
+      days: med.days ? med.days.split(',').map(d => d.trim()) : [],
     })
     setEditingId(med.id!)
     setShowAddForm(true)
@@ -134,7 +173,7 @@ export default function MedicationReminders() {
           onClick={() => {
             setShowAddForm(!showAddForm)
             setEditingId(null)
-            setFormData({ medication_name: '', time: '' })
+            setFormData({ medication_name: '', time: '', days: [] })
           }}
           className="button-large bg-primary-600 text-white hover:bg-primary-700 flex items-center gap-2"
         >
@@ -218,6 +257,40 @@ export default function MedicationReminders() {
               disabled={saving}
             />
           </div>
+          <div>
+            <label className="block text-xl font-semibold text-gray-700 mb-3">
+              Days (Select days for this medication)
+            </label>
+            <div className="flex flex-wrap gap-3 justify-center">
+              {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map((day) => {
+                const isSelected = formData.days.includes(day)
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    onClick={() => {
+                      const newDays = isSelected
+                        ? formData.days.filter(d => d !== day)
+                        : [...formData.days, day]
+                      setFormData({ ...formData, days: newDays })
+                      setError(null)
+                    }}
+                    className={`w-16 h-16 rounded-full text-sm font-semibold transition-all ${
+                      isSelected
+                        ? 'bg-primary-600 text-white shadow-lg scale-110'
+                        : 'bg-white text-gray-700 border-2 border-gray-300 hover:border-primary-400 hover:bg-primary-50'
+                    }`}
+                    disabled={saving}
+                  >
+                    {day.substring(0, 3)}
+                  </button>
+                )
+              })}
+            </div>
+            <p className="text-sm text-gray-500 mt-2 text-center">
+              {formData.days.length === 0 ? 'No days selected - medication will be scheduled for all days' : `Selected: ${formData.days.join(', ')}`}
+            </p>
+          </div>
           <button
             type="submit"
             disabled={saving}
@@ -237,9 +310,9 @@ export default function MedicationReminders() {
             <p className="text-lg text-gray-500 mt-2">Click "Add Medication" to get started.</p>
           </div>
         ) : (
-          medications.map((med) => (
+          medications.map((med, index) => (
             <div
-              key={med.id}
+              key={med.id || `med-${index}`}
               className="bg-white border-2 border-gray-200 rounded-lg p-6 hover:shadow-lg transition-shadow"
             >
               <div className="flex items-center justify-between">
@@ -249,6 +322,11 @@ export default function MedicationReminders() {
                     <h4 className="text-2xl font-semibold text-gray-800">{med.medication_name}</h4>
                   </div>
                   <p className="text-xl text-gray-600 ml-9">Time: {med.time}</p>
+                  {med.days && (
+                    <p className="text-lg text-gray-500 ml-9 mt-1">
+                      Days: {med.days}
+                    </p>
+                  )}
                   {med.last_taken && (
                     <p className="text-lg text-green-600 ml-9 mt-1">
                       Last taken: {format(new Date(med.last_taken), 'MMM d, yyyy h:mm a')}

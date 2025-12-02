@@ -123,6 +123,8 @@ def get_effective_settings() -> Dict[str, Any]:
         "word_of_day_enabled": True,
         "voice_gender": "female",  # Default to female voice
         "voice_locale": DEFAULT_VOICE_LOCALE,
+        "tts_provider": "murf",  # Default to Murf, can be "murf" or "fish_audio"
+        "voice_clone_id": None,  # Fish Audio reference_id for voice cloning
     }
     
     if memory:
@@ -155,19 +157,36 @@ async def _translate_text_or_none(text: str, target_language: str) -> Optional[s
 
 
 async def _synthesize_text_for_locale(text: str, settings: Dict[str, Any], voice_locale: str, sentiment: str = "neutral") -> Optional[bytes]:
+    """Synthesize text using the configured TTS provider (Murf or Fish Audio)."""
+    tts_provider = settings.get("tts_provider", "murf")  # Default to Murf
+    
     try:
-        return await synthesize_speech_with_murf(
-            text,
-            sentiment=sentiment,
-            api_key=Config.MURF_API_KEY,
-            api_url=Config.MURF_API_URL,
-            speech_rate=settings.get("speech_rate", 1.0),
-            sundowning_hour=settings.get("sundowning_hour", DEFAULT_SUNDOWNING_HOUR),
-            voice_gender=settings.get("voice_gender", "female"),
-            voice_locale=voice_locale,
-        )
+        if tts_provider == "fish_audio":
+            # Use Fish Audio for voice cloning
+            reference_id = settings.get("voice_clone_id")
+            language = voice_locale.split("-")[0] if "-" in voice_locale else voice_locale.lower()
+            
+            from src.utils.audio_processor import synthesize_speech_with_fish_audio
+            return await synthesize_speech_with_fish_audio(
+                text=text,
+                reference_id=reference_id,
+                language=language,
+                api_key=Config.FISH_AUDIO_API_KEY
+            )
+        else:
+            # Default to Murf
+            return await synthesize_speech_with_murf(
+                text,
+                sentiment=sentiment,
+                api_key=Config.MURF_API_KEY,
+                api_url=Config.MURF_API_URL,
+                speech_rate=settings.get("speech_rate", 1.0),
+                sundowning_hour=settings.get("sundowning_hour", DEFAULT_SUNDOWNING_HOUR),
+                voice_gender=settings.get("voice_gender", "female"),
+                voice_locale=voice_locale,
+            )
     except Exception as exc:
-        logger.error("Failed to synthesize text '%s' for locale %s: %s", text, voice_locale, exc)
+        logger.error("Failed to synthesize text '%s' for locale %s with provider %s: %s", text, voice_locale, tts_provider, exc)
         return None
 
 
@@ -204,6 +223,78 @@ def _session_state(session_id: str) -> Dict[str, Any]:
     })
     return session
 
+def _track_depressive_conversation(session_id: str, sentiment: str, transcript: str):
+    """Track depressive conversations and trigger emergency call if threshold reached."""
+    if not memory:
+        return
+    
+    session_ctx = _session_state(session_id)
+    
+    # Check if sentiment is depressive/risky
+    risky_keywords = ["suicide", "kill myself", "end it", "give up", "hopeless", "worthless", "no point", "want to die"]
+    is_depressive = sentiment in ("sad", "negative") or any(
+        word in transcript.lower() for word in risky_keywords
+    )
+    
+    if is_depressive:
+        # Increment depressive conversation counter
+        depressive_count = session_ctx.get("depressive_count", 0) + 1
+        session_ctx["depressive_count"] = depressive_count
+        session_ctx["last_depressive_at"] = datetime.now().isoformat()
+        
+        logger.warning(f"Depressive conversation detected (count: {depressive_count}): {transcript[:100]}")
+        
+        # Check if threshold reached (5+ in a row)
+        if depressive_count >= 5:
+            settings = get_effective_settings()
+            emergency_number = settings.get("emergency_number")
+            
+            if emergency_number:
+                logger.critical(f"EMERGENCY: Triggering call to {emergency_number} after {depressive_count} depressive conversations")
+                _trigger_emergency_call(emergency_number, depressive_count, transcript)
+                # Reset counter after emergency call
+                session_ctx["depressive_count"] = 0
+                session_ctx["last_emergency_call"] = datetime.now().isoformat()
+            else:
+                logger.warning("Emergency number not configured. Cannot make emergency call.")
+    else:
+        # Reset counter if conversation is not depressive
+        session_ctx["depressive_count"] = 0
+
+def _trigger_emergency_call(phone_number: str, conversation_count: int, last_transcript: str):
+    """Trigger emergency call to the specified phone number."""
+    if not memory:
+        return
+    
+    try:
+        import sqlite3
+        db_path = project_root / Config.DB_PATH
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO emergency_calls (phone_number, triggered_at, reason, conversation_count)
+            VALUES (?, ?, ?, ?)
+        """, (
+            phone_number,
+            datetime.now().isoformat(),
+            f"Depressive conversation pattern detected ({conversation_count} in a row)",
+            conversation_count
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        logger.critical(f"Emergency call logged to {phone_number}. Conversation count: {conversation_count}")
+        logger.critical(f"Last transcript: {last_transcript[:200]}")
+        
+        # TODO: Integrate with actual phone calling service (Twilio, etc.)
+        # For now, we log the emergency. In production, this would make an actual call.
+        # Example: twilio_client.calls.create(to=phone_number, from_=twilio_number, ...)
+        
+    except Exception as e:
+        logger.error(f"Failed to log emergency call: {e}", exc_info=True)
+
 def _should_trigger_reminiscence(transcript: str, sentiment: str) -> bool:
     lowered = transcript.lower()
     keywords = [
@@ -239,6 +330,9 @@ async def _build_response_for_transcript(
     logger.info(f"[Pipeline] Processing transcript trigger={trigger} len={len(transcript)} chars (session {session_id})")
 
     sentiment_result = sentiment_analyzer.analyze(transcript)
+    
+    # Track depressive conversations for emergency detection
+    _track_depressive_conversation(session_id, sentiment_result["sentiment"], transcript)
 
     conversation_state = forced_state or session_ctx.get("state", "idle")
     if conversation_state == "idle" and _should_trigger_reminiscence(transcript, sentiment_result["sentiment"]):
@@ -409,6 +503,19 @@ async def _medication_nudge_loop(session_id: str, safe_send_json, stop_event: as
                 if med_minutes is None:
                     continue
 
+                # Check if medication is scheduled for today
+                days_str = med.get("days")
+                if days_str and days_str.strip():
+                    day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                    current_day_name = day_names[now.weekday()]
+                    days_list = [d.strip() for d in days_str.split(',')]
+                    
+                    # Skip if current day is not in the list
+                    if (current_day_name not in days_list and 
+                        str(now.weekday()) not in days_list and 
+                        str(now.weekday() + 1) not in days_list):
+                        continue
+
                 diff = med_minutes - now_minutes
                 med_id = med.get("id", med_time)
                 day_key = now.strftime("%Y-%m-%d")
@@ -440,6 +547,7 @@ class ConversationMessage(BaseModel):
 class Medication(BaseModel):
     medication_name: str
     time: str
+    days: Optional[str] = None  # Comma-separated days (e.g., "Monday,Wednesday,Friday")
     last_reminded: Optional[str] = None
     last_taken: Optional[str] = None
 
@@ -455,6 +563,22 @@ class Settings(BaseModel):
     word_of_day_enabled: Optional[bool] = None
     voice_gender: Optional[str] = None  # "male" or "female"
     voice_locale: Optional[str] = None
+    tts_provider: Optional[str] = None  # "murf" or "fish_audio"
+    voice_clone_id: Optional[str] = None  # Fish Audio reference_id for voice cloning
+    emergency_number: Optional[str] = None  # Emergency contact phone number
+
+class VoiceCloneCreate(BaseModel):
+    name: str
+    reference_id: str
+    description: Optional[str] = None
+
+class VoiceCloneResponse(BaseModel):
+    id: int
+    name: str
+    reference_id: str
+    description: Optional[str] = None
+    is_active: bool
+    created_at: Optional[str] = None
 
 @app.on_event("startup")
 async def startup_event():
@@ -663,6 +787,7 @@ async def send_voice_message(session_id: str, audio: UploadFile = File(...)):
 
         if hindi_mode:
             import base64
+            logger.info(f"[HTTP][Hindi] Generating Hindi audio for: '{response_text_for_user[:50]}...'")
             hindi_audio = await _synthesize_text_for_locale(
                 response_text_for_user,
                 settings,
@@ -670,12 +795,18 @@ async def send_voice_message(session_id: str, audio: UploadFile = File(...)):
                 sentiment=payload["sentiment"],
             )
             if hindi_audio:
+                logger.info(f"[HTTP][Hindi] Generated {len(hindi_audio)} bytes of Hindi audio")
                 response_data["response_audio"] = base64.b64encode(hindi_audio).decode("utf-8")
                 response_data["response_audio_format"] = "wav"
+            else:
+                logger.warning(f"[HTTP][Hindi] Hindi audio generation returned None/empty")
         elif payload.get("audio"):
             import base64
+            logger.info(f"[HTTP] Encoding English audio: {len(payload['audio'])} bytes")
             response_data["response_audio"] = base64.b64encode(payload["audio"]).decode("utf-8")
             response_data["response_audio_format"] = "wav"
+        else:
+            logger.warning(f"[HTTP] No audio in payload for locale: {voice_locale}")
 
         return response_data
         
@@ -725,35 +856,13 @@ async def get_medications():
         return []
     
     try:
-        import sqlite3
-        conn = sqlite3.connect(Config.DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT id, medication_name, time, last_reminded, last_taken
-            FROM medication_schedule
-            ORDER BY time
-        """)
-        
-        rows = cursor.fetchall()
-        conn.close()
-        
-        medications = []
-        for row in rows:
-            med = {
-                "id": row["id"],
-                "medication_name": row["medication_name"],
-                "time": row["time"],
-                "last_reminded": row["last_reminded"],
-                "last_taken": row["last_taken"]
-            }
-            medications.append(med)
+        # Use memory method which handles the days field properly
+        medications = memory.get_all_medications()
         
         logger.info(f"Retrieved {len(medications)} medications")
         return medications
     except Exception as e:
-        logger.error(f"Error getting medications: {e}")
+        logger.error(f"Error getting medications: {e}", exc_info=True)
         return []
 
 @app.post("/medications")
@@ -763,43 +872,40 @@ async def add_medication(medication: Medication):
         raise HTTPException(status_code=503, detail="Memory not initialized")
     
     try:
-        memory.save_medication_schedule(medication.medication_name, medication.time)
+        # medication is a Pydantic model, access days directly
+        days_value = medication.days if hasattr(medication, 'days') else None
+        logger.info(f"Saving medication: {medication.medication_name} at {medication.time} with days: {days_value}")
         
-        # Get the newly created medication ID
-        import sqlite3
-        conn = sqlite3.connect(Config.DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        # Save using memory object (uses correct database path) and get the ID
+        medication_id = memory.save_medication_schedule(medication.medication_name, medication.time, days_value)
+        logger.info(f"Medication saved with ID: {medication_id}")
         
-        cursor.execute("""
-            SELECT id, medication_name, time, last_reminded, last_taken
-            FROM medication_schedule
-            WHERE medication_name = ? AND time = ?
-            ORDER BY id DESC
-            LIMIT 1
-        """, (medication.medication_name, medication.time))
+        # Get the medication we just saved using its ID
+        all_meds = memory.get_all_medications()
+        logger.info(f"Retrieved {len(all_meds)} total medications from database")
         
-        row = cursor.fetchone()
-        conn.close()
+        # Find the medication by ID
+        saved_med = next((m for m in all_meds if m.get("id") == medication_id), None)
         
-        if row:
-            result = {
-                "id": row["id"],
-                "medication_name": row["medication_name"],
-                "time": row["time"],
-                "last_reminded": row["last_reminded"],
-                "last_taken": row["last_taken"]
-            }
-            logger.info(f"Added medication: {medication.medication_name} at {medication.time}")
-            return result
+        if saved_med:
+            logger.info(f"Found saved medication: {saved_med}")
+            return saved_med
         else:
+            logger.error(f"Could not find medication with ID {medication_id} in database. Total medications: {len(all_meds)}")
+            if all_meds:
+                logger.error(f"Available medication IDs: {[m.get('id') for m in all_meds]}")
+            
+            # Return a response with the ID we got from save
             return {
-                "id": 0,
+                "id": medication_id,
                 "medication_name": medication.medication_name,
-                "time": medication.time
+                "time": medication.time,
+                "days": days_value,
+                "last_reminded": None,
+                "last_taken": None
             }
     except Exception as e:
-        logger.error(f"Error adding medication: {e}")
+        logger.error(f"Error adding medication: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to add medication: {str(e)}")
 
 @app.patch("/medications/{medication_id}")
@@ -810,7 +916,9 @@ async def update_medication(medication_id: int, medication: Dict[str, Any]):
     
     try:
         import sqlite3
-        conn = sqlite3.connect(Config.DB_PATH)
+        # Use the same database path as memory initialization
+        db_path = project_root / Config.DB_PATH
+        conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
         
         updates = []
@@ -831,6 +939,10 @@ async def update_medication(medication_id: int, medication: Dict[str, Any]):
         if "last_reminded" in medication:
             updates.append("last_reminded = ?")
             values.append(medication["last_reminded"])
+        
+        if "days" in medication:
+            updates.append("days = ?")
+            values.append(medication["days"])
         
         if updates:
             values.append(medication_id)
@@ -854,7 +966,9 @@ async def delete_medication(medication_id: int):
     
     try:
         import sqlite3
-        conn = sqlite3.connect(Config.DB_PATH)
+        # Use the same database path as memory initialization
+        db_path = project_root / Config.DB_PATH
+        conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
         
         cursor.execute("DELETE FROM medication_schedule WHERE id = ?", (medication_id,))
@@ -879,11 +993,175 @@ async def get_medications_due():
                 return []
             from datetime import datetime
             current_time = datetime.now().strftime("%H:%M")
-            medications = memory.get_medications_due(current_time)
+            current_day = datetime.now().weekday()  # 0=Monday, 6=Sunday
+            medications = memory.get_medications_due(current_time, current_day)
         return medications
     except Exception as e:
         logger.error(f"Error getting due medications: {e}")
         return []
+
+# Voice Clone endpoints
+@app.get("/voice-clones")
+async def get_voice_clones():
+    """Get all voice clones."""
+    if not memory:
+        return []
+    
+    try:
+        import sqlite3
+        db_path = project_root / Config.DB_PATH
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT id, name, reference_id, description, is_active, created_at
+            FROM voice_clones
+            ORDER BY created_at DESC
+        """)
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"Error getting voice clones: {e}")
+        return []
+
+@app.get("/voice-clones/active")
+async def get_active_voice_clone():
+    """Get the currently active voice clone."""
+    if not memory:
+        return None
+    
+    try:
+        import sqlite3
+        db_path = project_root / Config.DB_PATH
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT id, name, reference_id, description, is_active, created_at
+            FROM voice_clones
+            WHERE is_active = 1
+            LIMIT 1
+        """)
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return dict(row)
+        return None
+    except Exception as e:
+        logger.error(f"Error getting active voice clone: {e}")
+        return None
+
+@app.post("/voice-clones")
+async def create_voice_clone(voice: VoiceCloneCreate):
+    """Create a new voice clone."""
+    if not memory:
+        raise HTTPException(status_code=503, detail="Memory not initialized")
+    
+    try:
+        import sqlite3
+        db_path = project_root / Config.DB_PATH
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO voice_clones (name, reference_id, description, is_active, created_at)
+            VALUES (?, ?, ?, 0, ?)
+        """, (voice.name, voice.reference_id, voice.description, datetime.now().isoformat()))
+        
+        voice_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        
+        # Update settings to use this voice clone if it's the first one
+        settings = get_effective_settings()
+        if not settings.get("voice_clone_id"):
+            memory.save_settings({"voice_clone_id": voice.reference_id, "tts_provider": "fish_audio"})
+            # Activate this voice
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            cursor.execute("UPDATE voice_clones SET is_active = 1 WHERE id = ?", (voice_id,))
+            conn.commit()
+            conn.close()
+        
+        return {"id": voice_id, "name": voice.name, "reference_id": voice.reference_id, 
+                "description": voice.description, "is_active": False}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Voice clone with this reference_id already exists")
+    except Exception as e:
+        logger.error(f"Error creating voice clone: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create voice clone: {str(e)}")
+
+@app.post("/voice-clones/{voice_id}/activate")
+async def activate_voice_clone(voice_id: int):
+    """Activate a voice clone."""
+    if not memory:
+        raise HTTPException(status_code=503, detail="Memory not initialized")
+    
+    try:
+        import sqlite3
+        db_path = project_root / Config.DB_PATH
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        # Deactivate all other voices
+        cursor.execute("UPDATE voice_clones SET is_active = 0")
+        
+        # Activate this voice
+        cursor.execute("UPDATE voice_clones SET is_active = 1 WHERE id = ?", (voice_id,))
+        
+        # Get the reference_id
+        cursor.execute("SELECT reference_id FROM voice_clones WHERE id = ?", (voice_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Voice clone not found")
+        
+        reference_id = row[0]
+        
+        # Update settings
+        memory.save_settings({"voice_clone_id": reference_id, "tts_provider": "fish_audio"})
+        
+        conn.commit()
+        conn.close()
+        
+        return {"status": "activated"}
+    except Exception as e:
+        logger.error(f"Error activating voice clone: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to activate voice clone: {str(e)}")
+
+@app.delete("/voice-clones/{voice_id}")
+async def delete_voice_clone(voice_id: int):
+    """Delete a voice clone."""
+    if not memory:
+        raise HTTPException(status_code=503, detail="Memory not initialized")
+    
+    try:
+        import sqlite3
+        db_path = project_root / Config.DB_PATH
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM voice_clones WHERE id = ?", (voice_id,))
+        
+        if cursor.rowcount == 0:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Voice clone not found")
+        
+        conn.commit()
+        conn.close()
+        
+        return {"status": "deleted", "id": voice_id}
+    except Exception as e:
+        logger.error(f"Error deleting voice clone: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete voice clone: {str(e)}")
 
 # Word of the day endpoint
 @app.get("/word-of-day")
@@ -1079,6 +1357,7 @@ async def websocket_voice(websocket: WebSocket):
 
             if hindi_mode:
                 import base64
+                logger.info(f"[WebSocket][Hindi] Generating Hindi audio for: '{response_text_for_user[:50]}...'")
                 hindi_audio = await _synthesize_text_for_locale(
                     response_text_for_user,
                     settings,
@@ -1086,15 +1365,25 @@ async def websocket_voice(websocket: WebSocket):
                     sentiment=response_payload["sentiment"],
                 )
                 if hindi_audio:
+                    logger.info(f"[WebSocket][Hindi] Generated {len(hindi_audio)} bytes of Hindi audio")
                     await send_status("ai_speaking", trigger)
+                    audio_b64 = base64.b64encode(hindi_audio).decode("utf-8")
+                    logger.info(f"[WebSocket][Hindi] Sending audio (base64 length: {len(audio_b64)})")
                     await safe_send_json({
                         "type": "audio",
-                        "data": base64.b64encode(hindi_audio).decode("utf-8"),
+                        "data": audio_b64,
                         "format": "wav",
                         "text": response_text_for_user,
                     })
+                else:
+                    logger.warning(f"[WebSocket][Hindi] Hindi audio generation returned None/empty")
+                    await safe_send_json({
+                        "type": "error",
+                        "message": "Failed to generate Hindi audio. Please check TTS configuration.",
+                    })
             elif response_payload.get("audio"):
                 import base64
+                logger.info(f"[WebSocket] Sending English audio: {len(response_payload['audio'])} bytes")
                 await send_status("ai_speaking", trigger)
                 await safe_send_json({
                     "type": "audio",
@@ -1102,6 +1391,8 @@ async def websocket_voice(websocket: WebSocket):
                     "format": "wav",
                     "text": response_text_for_user,
                 })
+            else:
+                logger.warning(f"[WebSocket] No audio in response_payload for locale: {voice_locale}")
 
             await send_status("listening", trigger)
 
@@ -1221,6 +1512,8 @@ async def get_settings():
         "word_of_day_enabled": True,
         "voice_gender": "female",
         "voice_locale": DEFAULT_VOICE_LOCALE,
+        "tts_provider": "murf",
+        "voice_clone_id": None,
     }
     
     if not memory:
@@ -1267,6 +1560,70 @@ async def update_settings(settings: Settings):
     except Exception as e:
         logger.error(f"Error updating settings: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to save settings: {str(e)}")
+
+# Fish Audio endpoints
+@app.get("/fish-audio/voices")
+async def list_fish_audio_voices(limit: int = 50):
+    """List available voices from Fish Audio."""
+    if not Config.FISH_AUDIO_API_KEY:
+        raise HTTPException(status_code=503, detail="Fish Audio API key not configured")
+    
+    try:
+        from src.tts.fish_audio_client import FishAudioClient
+        client = FishAudioClient(Config.FISH_AUDIO_API_KEY)
+        voices = await client.list_voices(limit=limit)
+        await client.close()
+        return {"voices": voices}
+    except Exception as e:
+        logger.error(f"Error listing Fish Audio voices: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list voices: {str(e)}")
+
+@app.get("/fish-audio/voices/{reference_id}")
+async def get_fish_audio_voice(reference_id: str):
+    """Get information about a specific Fish Audio voice."""
+    if not Config.FISH_AUDIO_API_KEY:
+        raise HTTPException(status_code=503, detail="Fish Audio API key not configured")
+    
+    try:
+        from src.tts.fish_audio_client import FishAudioClient
+        client = FishAudioClient(Config.FISH_AUDIO_API_KEY)
+        voice_info = await client.get_voice_info(reference_id)
+        await client.close()
+        return voice_info
+    except Exception as e:
+        logger.error(f"Error getting Fish Audio voice info: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get voice info: {str(e)}")
+
+@app.post("/fish-audio/test")
+async def test_fish_audio_voice(request: Dict[str, Any]):
+    """Test Fish Audio voice synthesis."""
+    if not Config.FISH_AUDIO_API_KEY:
+        raise HTTPException(status_code=503, detail="Fish Audio API key not configured")
+    
+    try:
+        text = request.get("text", "Hello, this is a test of Fish Audio voice cloning.")
+        reference_id = request.get("reference_id")
+        language = request.get("language", "en")
+        
+        from src.tts.fish_audio_client import FishAudioClient
+        client = FishAudioClient(Config.FISH_AUDIO_API_KEY)
+        audio_bytes = await client.synthesize(
+            text=text,
+            reference_id=reference_id,
+            language=language
+        )
+        await client.close()
+        
+        import base64
+        return {
+            "status": "success",
+            "audio": base64.b64encode(audio_bytes).decode("utf-8"),
+            "format": "mp3",
+            "size": len(audio_bytes)
+        }
+    except Exception as e:
+        logger.error(f"Error testing Fish Audio voice: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to test voice: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

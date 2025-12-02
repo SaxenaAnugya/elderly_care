@@ -42,8 +42,8 @@ export default function Home() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 flex items-center justify-center">
-        <div className="text-center">
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center bg-white/30 backdrop-blur-sm rounded-lg p-8">
           <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-indigo-600 mx-auto mb-4"></div>
           <p className="text-2xl text-gray-700">Loading...</p>
         </div>
@@ -53,20 +53,21 @@ export default function Home() {
 
   if (!isInitialized) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 flex items-center justify-center p-4">
+      <div className="min-h-screen flex items-center justify-center p-4">
         <div className="max-w-4xl w-full">
           {/* Header */}
           <div className="text-center mb-12">
             <h1 className="text-6xl font-light text-gray-800 mb-4 tracking-wide">
-              Loneliness Companion
+            <b>NIVARA </b>
             </h1>
+            
             <p className="text-2xl text-gray-600 font-light">
-              Your caring AI friend, always here to listen
+            Your trusted AI SAATHI, listening deeply, caring quietly, supporting your wellness gently.
             </p>
           </div>
 
           {/* Voice Selection */}
-          <div className="bg-white/80 backdrop-blur-lg rounded-3xl shadow-2xl p-12 border border-white/20">
+          <div className="rounded-3xl p-12">
             <h2 className="text-4xl font-light text-gray-800 text-center mb-8">
               Choose Your Companion's Voice
             </h2>
@@ -125,7 +126,7 @@ export default function Home() {
 
   // Show voice interface after selection
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
+    <div className="min-h-screen">
       <VoiceInterface voiceGender={voiceGender} />
     </div>
   )
