@@ -62,6 +62,7 @@ class MurfTTSClient:
         speech_rate: Optional[float] = None,
         sundowning_hour: Optional[int] = None,
         voice_gender: Optional[str] = None,
+        voice_locale: Optional[str] = None,
     ) -> bytes:
         """Synthesize speech using Murf SDK and return audio bytes (wav)."""
         if not text or not text.strip():
@@ -70,7 +71,7 @@ class MurfTTSClient:
         # Determine or validate a supported voice id (may call Murf REST API)
         selected_voice_id = voice_id
         if not selected_voice_id:
-            selected_voice_id = await self._choose_voice_id(voice_gender)
+            selected_voice_id = await self._choose_voice_id(voice_gender, voice_locale)
 
         # Use SDK in a thread (SDK is sync/blocking)
         def _generate():
@@ -85,6 +86,19 @@ class MurfTTSClient:
                 'sample_rate': 24000.0,
                 'style': 'Conversation',
             }
+            if voice_locale:
+                payload['multi_native_locale'] = voice_locale
+                payload['language'] = voice_locale  # some SDK versions expect `language`
+
+            if speech_rate is not None:
+                # Murf accepts rate between -50 (slower) and +50 (faster)
+                # Our UI stores 0.5x - 2.0x, so map linearly with clamp.
+                rate = int((speech_rate - 1.0) * 50)
+                if rate < -50:
+                    rate = -50
+                if rate > 50:
+                    rate = 50
+                payload['rate'] = rate
 
             # Try the full payload first, but gracefully fall back if the SDK rejects unknown kwargs
             try:
@@ -243,8 +257,8 @@ class MurfTTSClient:
         self._voices_cache = {"voices": normalized, "ts": now}
         return normalized
 
-    async def _choose_voice_id(self, voice_gender: Optional[str] = None) -> str:
-        """Choose a valid voice id from Murf voices, prefer gender when possible."""
+    async def _choose_voice_id(self, voice_gender: Optional[str] = None, voice_locale: Optional[str] = None) -> str:
+        """Choose a valid voice id from Murf voices, prefer locale/gender when possible."""
         voices = await self._fetch_voices()
         if not voices:
             raise RuntimeError("No Murf voices available from API")
@@ -253,9 +267,35 @@ class MurfTTSClient:
         def vid(v: Dict) -> Optional[str]:
             return v.get("id") or v.get("voiceId") or v.get("name")
 
+        def matches_locale(v: Dict) -> bool:
+            if not voice_locale:
+                return True
+            locale_low = voice_locale.lower()
+            locale_fields = [
+                v.get("locale"),
+                v.get("language"),
+                v.get("nativeLocale"),
+                v.get("multiNativeLocale"),
+                v.get("accent"),
+            ]
+            for field in locale_fields:
+                if isinstance(field, str) and locale_low in field.lower():
+                    return True
+                if isinstance(field, (list, tuple)) and any(locale_low in str(item).lower() for item in field):
+                    return True
+            supported = v.get("supportedLocales") or v.get("supported_languages")
+            if isinstance(supported, dict):
+                supported = list(supported.values())
+            if isinstance(supported, (list, tuple)) and any(locale_low in str(item).lower() for item in supported):
+                return True
+            return False
+
+        locale_filtered = [v for v in voices if matches_locale(v)]
+        candidate_voices = locale_filtered if locale_filtered else voices
+
         # Try exact gender match if voice metadata exposes 'gender'
         if voice_gender:
-            matches = [v for v in voices if str(v.get("gender", "")).lower() == voice_gender.lower()]
+            matches = [v for v in candidate_voices if str(v.get("gender", "")).lower() == voice_gender.lower()]
             if matches:
                 first = vid(matches[0])
                 if first:
@@ -264,7 +304,7 @@ class MurfTTSClient:
         # Try to infer gender from name
         if voice_gender:
             keyword = "female" if voice_gender.lower() == "female" else "male"
-            for v in voices:
+            for v in candidate_voices:
                 name = str(v.get("name", "") or "").lower()
                 if keyword in name:
                     vidx = vid(v)
@@ -272,7 +312,7 @@ class MurfTTSClient:
                         return vidx
 
         # Prefer voices that support Falcon model if present
-        for v in voices:
+        for v in candidate_voices:
             models = v.get("models") or v.get("model") or v.get("supportedModels") or []
             if isinstance(models, (list, tuple)) and any("falcon" in str(m).lower() for m in models):
                 vidx = vid(v)

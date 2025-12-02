@@ -76,6 +76,21 @@ Guidelines:
             base_prompt += "\n- You're in a medication reminder conversation. Be helpful and conversational, not alarm-like.\n"
         elif state == "word_of_day":
             base_prompt += "\n- You're discussing a word of the day. Keep it engaging and encourage the user to share.\n"
+        elif state == "medication_nudge":
+            base_prompt += (
+                "\n- This is a medication follow-up. Remind them kindly, confirm if they've taken it,"
+                " and offer help. Use calm, reassuring words.\n"
+            )
+        elif state == "reminiscence":
+            base_prompt += (
+                "\n- The user needs gentle reminiscence therapy. Invite them to share a warm memory,"
+                " ask about sensory details, and validate their feelings. Keep a hopeful, nostalgic tone.\n"
+            )
+        elif state == "patience_prompt":
+            base_prompt += (
+                "\n- The user has been silent. Offer a short, friendly nudge letting them know you're still listening"
+                " with no pressure. Encourage them softly to continue when ready.\n"
+            )
         
         return base_prompt
     

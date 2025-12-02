@@ -211,6 +211,20 @@ class ConversationMemory:
         
         conn.commit()
         conn.close()
+
+    def get_all_medications(self) -> List[Dict]:
+        """Return all scheduled medications."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, medication_name, time, last_reminded, last_taken
+            FROM medication_schedule
+            ORDER BY time
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
     
     def save_settings(self, settings: Dict):
         """

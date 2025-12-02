@@ -11,10 +11,14 @@ class Config:
     MURF_API_KEY = os.getenv("MURF_API_KEY", "")
     MURF_API_URL = os.getenv("MURF_API_URL", "https://api.murf.ai/v1")
     DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
+    # NOTE: DEFAULT_VOICE_LOCALE, PATIENCE_MODE_SILENCE_MS, and SUNDOWNING_HOUR
+    # are now managed in the database via settings. These are hardcoded defaults
+    # only used as fallback when database is not available.
+    DEFAULT_VOICE_LOCALE = "en-US"  # Hardcoded default (not from .env)
     
     # ASR Settings - Patience Mode
-    PATIENCE_MODE_SILENCE_MS = int(os.getenv("PATIENCE_MODE_SILENCE_MS", "2000"))
-    ASR_MODEL = "nova-2"  # Deepgram model optimized for conversational audio
+    PATIENCE_MODE_SILENCE_MS = 2000  # Hardcoded default (not from .env)
+    ASR_MODEL = "nova-3"  # Deepgram model optimized for conversational audio
     
     # TTS Settings - Murf Falcon
     MURF_VOICE_ID = "en-US-Neural"  # Base voice ID (adjust based on available voices)
@@ -27,10 +31,12 @@ class Config:
     CALM_PITCH = -0.1  # Slightly lower pitch for calming effect
     
     # Time-based Settings
-    SUNDOWNING_HOUR = int(os.getenv("SUNDOWNING_HOUR", "17"))  # 5 PM
+    SUNDOWNING_HOUR = 17  # Hardcoded default (not from .env) - 5 PM
     
     # Medication Reminders
     MEDICATION_REMINDER_INTERVAL_MINUTES = int(os.getenv("MEDICATION_REMINDER_INTERVAL_MINUTES", "60"))
+    MEDICATION_NUDGE_LEAD_MINUTES = int(os.getenv("MEDICATION_NUDGE_LEAD_MINUTES", "10"))
+    MEDICATION_NUDGE_GRACE_MINUTES = int(os.getenv("MEDICATION_NUDGE_GRACE_MINUTES", "2"))
     
     # Voice Styles for Murf Falcon (based on sentiment)
     VOICE_STYLES = {

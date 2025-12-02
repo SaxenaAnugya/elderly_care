@@ -13,6 +13,7 @@ export default function Settings() {
     medication_reminders_enabled: true,
     word_of_day_enabled: true,
     voice_gender: 'female' as 'male' | 'female',
+    voice_locale: 'en-US',
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -157,6 +158,23 @@ export default function Settings() {
                   </div>
                 </button>
               </div>
+            </div>
+
+            <div>
+              <label className="block text-xl font-semibold text-gray-700 mb-3">
+                Preferred Language
+              </label>
+              <select
+                value={settings.voice_locale}
+                onChange={(e) => setSettings({ ...settings, voice_locale: e.target.value })}
+                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg text-lg focus:border-primary-500 focus-visible-large bg-white"
+              >
+                <option value="en-US">English (United States)</option>
+                <option value="hi-IN">हिन्दी / Hindi (India)</option>
+              </select>
+              <p className="text-base text-gray-600 mt-1">
+                Speech recognition and voice respond in the selected language.
+              </p>
             </div>
           </div>
         </div>
