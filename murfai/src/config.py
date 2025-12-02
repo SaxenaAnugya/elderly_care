@@ -18,7 +18,7 @@ class Config:
     
     # ASR Settings - Patience Mode
     PATIENCE_MODE_SILENCE_MS = 2000  # Hardcoded default (not from .env)
-    ASR_MODEL = "nova-2"  # Deepgram model optimized for conversational audio
+    ASR_MODEL = "nova-3"  # Deepgram model optimized for conversational audio
     
     # TTS Settings - Murf Falcon
     MURF_VOICE_ID = "en-US-Neural"  # Base voice ID (adjust based on available voices)

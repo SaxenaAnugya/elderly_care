@@ -28,10 +28,13 @@ from src.memory.conversation_db import ConversationMemory
 from src.llm.response_generator import DynamicResponseGenerator
 from src.sentiment.analyzer import SentimentAnalyzer
 from src.utils.audio_processor import synthesize_speech_with_murf, transcribe_audio_with_deepgram
+from src.utils.translator import translate_texts
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+HINDI_TRANSLATION_FALLBACK = "Hindi translation kaam nahi kar raha"
 
 
 def _save_and_convert_debug_audio(session_id: str, label: str, audio_bytes: bytes, ext_hint: str = 'webm') -> Dict[str, str]:
@@ -138,6 +141,55 @@ def _normalize_locale(locale_value: Optional[str]) -> str:
     if not locale_value:
         return DEFAULT_VOICE_LOCALE
     return locale_value
+
+
+def _is_hindi_locale(locale_value: Optional[str]) -> bool:
+    return bool(locale_value and locale_value.lower().startswith("hi"))
+
+
+async def _translate_text_or_none(text: str, target_language: str) -> Optional[str]:
+    translations = await translate_texts([text], target_language)
+    if translations and translations[0]:
+        return translations[0]
+    return None
+
+
+async def _synthesize_text_for_locale(text: str, settings: Dict[str, Any], voice_locale: str, sentiment: str = "neutral") -> Optional[bytes]:
+    try:
+        return await synthesize_speech_with_murf(
+            text,
+            sentiment=sentiment,
+            api_key=Config.MURF_API_KEY,
+            api_url=Config.MURF_API_URL,
+            speech_rate=settings.get("speech_rate", 1.0),
+            sundowning_hour=settings.get("sundowning_hour", DEFAULT_SUNDOWNING_HOUR),
+            voice_gender=settings.get("voice_gender", "female"),
+            voice_locale=voice_locale,
+        )
+    except Exception as exc:
+        logger.error("Failed to synthesize text '%s' for locale %s: %s", text, voice_locale, exc)
+        return None
+
+
+async def _build_translation_failure_http_response(
+    transcript: str,
+    voice_locale: str,
+    settings: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return a standard fallback response when translation fails."""
+    import base64
+
+    fallback_text = HINDI_TRANSLATION_FALLBACK
+    response_data: Dict[str, Any] = {
+        "transcript": transcript or "",
+        "response": fallback_text,
+        "sentiment": "neutral",
+    }
+    audio_payload = await _synthesize_text_for_locale(fallback_text, settings, voice_locale, sentiment="calm")
+    if audio_payload:
+        response_data["response_audio"] = base64.b64encode(audio_payload).decode("utf-8")
+        response_data["response_audio_format"] = "wav"
+    return response_data
 
 def _session_state(session_id: str) -> Dict[str, Any]:
     session = active_sessions.setdefault(session_id, {
@@ -540,6 +592,9 @@ async def send_voice_message(session_id: str, audio: UploadFile = File(...)):
         settings = get_effective_settings()
         patience_mode = settings.get("patience_mode", DEFAULT_PATIENCE_MODE_MS)
         voice_locale = _normalize_locale(settings.get("voice_locale"))
+        hindi_mode = _is_hindi_locale(voice_locale)
+        deepgram_language = "multi" if hindi_mode else voice_locale
+        fallback_languages = [voice_locale] if hindi_mode else None
 
         content_type = audio.content_type or "audio/webm;codecs=opus"
         try:
@@ -553,7 +608,8 @@ async def send_voice_message(session_id: str, audio: UploadFile = File(...)):
                 Config.DEEPGRAM_API_KEY,
                 content_type,
                 patience_mode_ms=patience_mode,
-                language=voice_locale,
+                language=deepgram_language,
+                fallback_languages=fallback_languages,
             )
         except Exception as e:
             logger.warning(f"Deepgram transcription error: {e}", exc_info=True)
@@ -572,20 +628,51 @@ async def send_voice_message(session_id: str, audio: UploadFile = File(...)):
                 "sentiment": "neutral",
             }
 
+        transcript_for_llm = transcript
+        if hindi_mode:
+            translated = await _translate_text_or_none(transcript, "en-US")
+            if translated:
+                logger.info("[Translation] hi->en input: %s", translated)
+                transcript_for_llm = translated
+            else:
+                logger.warning("[Translation] Input hi->en failed; returning fallback response")
+                return await _build_translation_failure_http_response(transcript, voice_locale, settings)
+
         payload = await _build_response_for_transcript(
-            transcript,
+            transcript_for_llm,
             session_id,
             trigger="http_fallback",
         )
 
+        response_text_for_user = payload["text"]
+        if hindi_mode and response_text_for_user:
+            translated_out = await _translate_text_or_none(response_text_for_user, voice_locale)
+            if translated_out:
+                logger.info("[Translation] en->hi output: %s", translated_out)
+                response_text_for_user = translated_out
+            else:
+                logger.warning("[Translation] Output en->hi failed; using fallback text")
+                response_text_for_user = HINDI_TRANSLATION_FALLBACK
+
         response_data = {
             "transcript": transcript,
-            "response": payload["text"],
+            "response": response_text_for_user,
             "sentiment": payload["sentiment"],
         }
-        logger.info(f"[HTTP] Transcribed {len(transcript)} chars -> response {len(payload['text'])} chars (session {session_id})")
+        logger.info(f"[HTTP] Transcribed {len(transcript)} chars -> response {len(response_text_for_user)} chars (session {session_id})")
 
-        if payload.get("audio"):
+        if hindi_mode:
+            import base64
+            hindi_audio = await _synthesize_text_for_locale(
+                response_text_for_user,
+                settings,
+                voice_locale,
+                sentiment=payload["sentiment"],
+            )
+            if hindi_audio:
+                response_data["response_audio"] = base64.b64encode(hindi_audio).decode("utf-8")
+                response_data["response_audio_format"] = "wav"
+        elif payload.get("audio"):
             import base64
             response_data["response_audio"] = base64.b64encode(payload["audio"]).decode("utf-8")
             response_data["response_audio_format"] = "wav"
@@ -905,6 +992,9 @@ async def websocket_voice(websocket: WebSocket):
         settings = get_effective_settings()
         patience_mode = settings.get("patience_mode", DEFAULT_PATIENCE_MODE_MS)
         voice_locale = _normalize_locale(settings.get("voice_locale"))
+        hindi_mode = _is_hindi_locale(voice_locale)
+        deepgram_language = "multi" if hindi_mode else voice_locale
+        fallback_languages = [voice_locale] if hindi_mode else None
 
         async with processing_lock:
             await send_status("processing", trigger)
@@ -914,7 +1004,8 @@ async def websocket_voice(websocket: WebSocket):
                     Config.DEEPGRAM_API_KEY,
                     "audio/webm;codecs=opus",
                     patience_mode_ms=patience_mode,
-                    language=voice_locale,
+                    language=deepgram_language,
+                    fallback_languages=fallback_languages,
                 )
             except Exception as e:
                 logger.warning(f"Deepgram transcription error ({trigger}): {e}", exc_info=True)
@@ -937,26 +1028,79 @@ async def websocket_voice(websocket: WebSocket):
             })
             logger.info(f"[WebSocket] Transcript len={len(transcript)} chars (trigger={trigger}, session={session_id})")
 
+            transcript_for_llm = transcript
+            if hindi_mode:
+                translated = await _translate_text_or_none(transcript, "en-US")
+                if translated:
+                    logger.info("[Translation][WS] hi->en input: %s", translated)
+                    transcript_for_llm = translated
+                else:
+                    logger.warning("[Translation][WS] Input hi->en failed; sending fallback message")
+                    fallback_text = HINDI_TRANSLATION_FALLBACK
+                    await safe_send_json({
+                        "type": "response",
+                        "text": fallback_text,
+                        "sentiment": "neutral",
+                    })
+                    import base64
+                    fallback_audio = await _synthesize_text_for_locale(fallback_text, settings, voice_locale, sentiment="calm")
+                    if fallback_audio:
+                        await send_status("ai_speaking", trigger)
+                        await safe_send_json({
+                            "type": "audio",
+                            "data": base64.b64encode(fallback_audio).decode("utf-8"),
+                            "format": "wav",
+                            "text": fallback_text,
+                        })
+                    await send_status("listening", trigger)
+                    return
+
             response_payload = await _build_response_for_transcript(
-                transcript,
+                transcript_for_llm,
                 session_id,
                 trigger,
             )
 
+            response_text_for_user = response_payload["text"]
+            if hindi_mode and response_text_for_user:
+                translated_out = await _translate_text_or_none(response_text_for_user, voice_locale)
+                if translated_out:
+                    logger.info("[Translation][WS] en->hi output: %s", translated_out)
+                    response_text_for_user = translated_out
+                else:
+                    logger.warning("[Translation][WS] Output en->hi failed; using fallback")
+                    response_text_for_user = HINDI_TRANSLATION_FALLBACK
+
             await safe_send_json({
                 "type": "response",
-                "text": response_payload["text"],
+                "text": response_text_for_user,
                 "sentiment": response_payload["sentiment"],
             })
 
-            if response_payload.get("audio"):
+            if hindi_mode:
+                import base64
+                hindi_audio = await _synthesize_text_for_locale(
+                    response_text_for_user,
+                    settings,
+                    voice_locale,
+                    sentiment=response_payload["sentiment"],
+                )
+                if hindi_audio:
+                    await send_status("ai_speaking", trigger)
+                    await safe_send_json({
+                        "type": "audio",
+                        "data": base64.b64encode(hindi_audio).decode("utf-8"),
+                        "format": "wav",
+                        "text": response_text_for_user,
+                    })
+            elif response_payload.get("audio"):
                 import base64
                 await send_status("ai_speaking", trigger)
                 await safe_send_json({
                     "type": "audio",
                     "data": base64.b64encode(response_payload["audio"]).decode("utf-8"),
                     "format": "wav",
-                    "text": response_payload["text"],  # Include text so frontend can update displayed response
+                    "text": response_text_for_user,
                 })
 
             await send_status("listening", trigger)

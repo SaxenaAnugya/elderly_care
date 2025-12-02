@@ -88,6 +88,17 @@ class MurfTTSClient:
             }
             if voice_locale:
                 payload['multi_native_locale'] = voice_locale
+                payload['language'] = voice_locale  # some SDK versions expect `language`
+
+            if speech_rate is not None:
+                # Murf accepts rate between -50 (slower) and +50 (faster)
+                # Our UI stores 0.5x - 2.0x, so map linearly with clamp.
+                rate = int((speech_rate - 1.0) * 50)
+                if rate < -50:
+                    rate = -50
+                if rate > 50:
+                    rate = 50
+                payload['rate'] = rate
 
             # Try the full payload first, but gracefully fall back if the SDK rejects unknown kwargs
             try:
