@@ -260,6 +260,3 @@ This project is created for the IITB Hackathon.
 - Deepgram for ASR API
 - VADER Sentiment for emotion detection
 
-## Support
-
-For issues or questions, please check the logs in `companion.log` or review the configuration in `src/config.py`.
