@@ -4,12 +4,10 @@ A voice-first AI companion specifically designed for senior citizens. The compan
 
 ## ✨ Dynamic System
 
-**The system is now fully dynamic!** All responses, templates, and configurations are loaded from `config.json` - no code changes needed to customize behavior.
-
-- **LLM-Based Responses**: Uses free LLM APIs (Hugging Face, Groq) for dynamic conversation
+**The system is now fully dynamic!** 
+- **LLM-Based Responses**: for dynamic conversation
 - **Configurable Templates**: Medication reminders, word database, voice styles all in JSON
 - **Runtime Updates**: Change behavior without restarting
-- **See [DYNAMIC_SYSTEM.md](DYNAMIC_SYSTEM.md) for details**
 
 ## Features
 
