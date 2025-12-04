@@ -1,6 +1,6 @@
 # Loneliness Companion - Voice Agent for Elderly Care
 
-A voice-first AI companion specifically designed for senior citizens. The companion uses advanced speech recognition (ASR) and text-to-speech (TTS) technologies to provide emotional warmth and connection through natural conversation.
+A voice-first AI @murf-ai companion specifically designed for senior citizens. The companion uses advanced speech recognition (ASR) and text-to-speech (TTS) technologies to provide emotional warmth and connection through natural conversation.
 
 ## ✨ Dynamic System
 
